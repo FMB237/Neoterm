@@ -1,0 +1,29 @@
+[package]
+name = "neoterm"
+version = "0.1.0"
+edition = "2021"
+description = "NeoTerm - GPU terminal (pure Rust)"
+
+[[bin]]
+name = "neoterm"
+path = "src/main.rs"
+
+[dependencies]
+alacritty_terminal = "0.26"
+portable-pty = "0.9"
+vte = "0.15"
+winit = "0.30"
+wgpu = "30"
+glyphon = "0.12"
+cosmic-text = "0.19"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+log = "0.4"
+env_logger = "0.11"
+dirs = "5"
+notify = "6"
+pollster = "0.4"
+bytemuck = "1"
+arboard = "3"
