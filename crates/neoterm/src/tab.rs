@@ -124,6 +124,10 @@ pub struct Pane {
     /// Set by the PTY reader thread when the shell exits (PTY EOF or read
     /// error). The main loop reaps dead tabs (`exit` closes the tab).
     pub dead: Arc<AtomicBool>,
+    /// Theme ANSI palette (16 entries) + cursor color, applied to named
+    /// colors at resolve time. Refreshed on config reload.
+    palette: [(u8, u8, u8); 16],
+    cursor_rgb: (u8, u8, u8),
     /// Last cursor position seen by `take_damage` (stale-cursor detection:
     /// cursor-only moves don't always mark grid damage).
     last_cursor: Mutex<(usize, usize)>,
@@ -223,8 +227,16 @@ impl Pane {
             _child: child,
             dirty,
             dead,
+            palette: cfg.theme.palette_rgb(),
+            cursor_rgb: cfg.theme.cursor_rgb(),
             last_cursor: Mutex::new((0, 0)),
         })
+    }
+
+    /// Refresh theme colors after a config reload (no respawn needed).
+    pub fn apply_config(&mut self, cfg: &NeotermConfig) {
+        self.palette = cfg.theme.palette_rgb();
+        self.cursor_rgb = cfg.theme.cursor_rgb();
     }
 
     /// Live tab title: OSC 0/2 name from the running app, else `tab-{id}`.
@@ -407,7 +419,14 @@ impl Pane {
         let Ok(term) = self.term.lock() else {
             return (vec![], (0, 0));
         };
-        render_term_rows(&term, default_fg, default_bg, cursor_visible)
+        render_term_rows(
+            &term,
+            default_fg,
+            default_bg,
+            cursor_visible,
+            &self.palette,
+            self.cursor_rgb,
+        )
     }
 }
 
@@ -1093,6 +1112,11 @@ impl Tab {
             .unwrap_or_default()
     }
 
+    pub fn apply_config(&mut self, cfg: &NeotermConfig) {
+        for p in self.panes.values_mut() {
+            p.apply_config(cfg);
+        }
+    }
 }
 
 /// Snapshot visible rows of a terminal with resolved per-cell styles.
@@ -1104,6 +1128,8 @@ pub fn render_term_rows(
     default_fg: (u8, u8, u8),
     default_bg: (u8, u8, u8),
     cursor_visible: bool,
+    palette: &[(u8, u8, u8); 16],
+    cursor_rgb: (u8, u8, u8),
 ) -> (Vec<RowContent>, (usize, usize)) {
         let cols = term.columns();
         let rows = term.screen_lines();
@@ -1152,17 +1178,31 @@ pub fn render_term_rows(
             let mut cells: Vec<(char, CellStyle)> = Vec::with_capacity(cols);
             // Char index of the cursor cell within `cells`.
             let mut cursor_char: Option<usize> = None;
+            // Background runs in exact grid columns (spacers included for
+            // continuity). Only non-default backgrounds are recorded.
+            let mut bg_rects: Vec<(usize, usize, (u8, u8, u8))> = Vec::new();
+            let mut bg_run: Option<(usize, (u8, u8, u8))> = None;
             for col_idx in 0..cols {
                 let cell = &grid[line][Column(col_idx)];
                 let bold = cell.flags.contains(Flags::BOLD);
                 let italic = cell.flags.contains(Flags::ITALIC);
                 let dim = cell.flags.contains(Flags::DIM);
                 let mut fg =
-                    resolve_color(cell.fg, colors, true, bold, dim, default_fg, default_bg);
+                    resolve_color(cell.fg, colors, true, bold, dim, default_fg, default_bg, palette);
                 let mut bg =
-                    resolve_color(cell.bg, colors, false, false, false, default_fg, default_bg);
+                    resolve_color(cell.bg, colors, false, false, false, default_fg, default_bg, palette);
                 if cell.flags.contains(Flags::INVERSE) {
                     std::mem::swap(&mut fg, &mut bg);
+                }
+                // Track the bg run (every column, spacers included).
+                let continues = matches!(bg_run, Some((_, rgb)) if rgb == bg);
+                if !continues {
+                    if let Some((lo, rgb)) = bg_run.take() {
+                        bg_rects.push((lo, col_idx - 1, rgb));
+                    }
+                    if bg != default_bg {
+                        bg_run = Some((col_idx, bg));
+                    }
                 }
                 if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
                     if cursor_vrow == row_idx as i32 && cursor_col == col_idx {
@@ -1187,8 +1227,17 @@ pub fn render_term_rows(
                     },
                 ));
             }
-            // Trim trailing blanks (invisible without per-cell backgrounds).
-            while cells.last().map(|(c, _)| *c == ' ').unwrap_or(false) {
+            // Flush the trailing bg run.
+            if let Some((lo, rgb)) = bg_run.take() {
+                bg_rects.push((lo, cols.saturating_sub(1), rgb));
+            }
+            // Trim trailing blanks, but keep colored-background padding: its
+            // bg rect is part of the rendered output (e.g. vim statuslines).
+            while cells
+                .last()
+                .map(|(c, s)| *c == ' ' && s.bg == default_bg)
+                .unwrap_or(false)
+            {
                 cells.pop();
             }
             // Bake the block cursor (skipped when scrolled out of view).
@@ -1196,7 +1245,7 @@ pub fn render_term_rows(
                 let placed = match cursor_char {
                     Some(idx) if idx < cells.len() => {
                         cells[idx].0 = '█';
-                        cells[idx].1.fg = default_fg;
+                        cells[idx].1.fg = cursor_rgb;
                         true
                     }
                     _ => false,
@@ -1216,7 +1265,7 @@ pub fn render_term_rows(
                     let idx = cursor_col.min(cells.len().saturating_sub(1));
                     if let Some(slot) = cells.get_mut(idx) {
                         slot.0 = '█';
-                        slot.1.fg = default_fg;
+                        slot.1.fg = cursor_rgb;
                     }
                 }
             }
@@ -1240,6 +1289,7 @@ pub fn render_term_rows(
                 text,
                 spans,
                 sel_cols,
+                bg_rects,
             });
         }
         (out, cursor)
@@ -1272,6 +1322,8 @@ pub struct RowContent {
     pub text: String,
     pub spans: Vec<(Range<usize>, CellStyle)>,
     pub sel_cols: Option<(usize, usize)>,
+    /// Non-default background runs as exact (lo_col, hi_col, rgb) triples.
+    pub bg_rects: Vec<(usize, usize, (u8, u8, u8))>,
 }
 
 impl RowContent {
@@ -1280,11 +1332,14 @@ impl RowContent {
             text: String::new(),
             spans: Vec::new(),
             sel_cols: None,
+            bg_rects: Vec::new(),
         }
     }
 }
 
-/// Base-16 entries of the xterm table: the palette until themes land.
+/// Base-16 entries of the xterm table (kept for tests; the live path
+/// resolves 0..15 through the theme palette instead).
+#[cfg(test)]
 const XTERM_BASE: [(u8, u8, u8); 16] = [
     (0, 0, 0),
     (205, 0, 0),
@@ -1306,9 +1361,9 @@ const XTERM_BASE: [(u8, u8, u8); 16] = [
 
 /// xterm 256-color lookup (16..232 color cube, 232..256 grayscale ramp).
 /// Entries 0..15 come from the theme palette.
-fn xterm_indexed(i: u8) -> (u8, u8, u8) {
+fn xterm_indexed(i: u8, palette: &[(u8, u8, u8); 16]) -> (u8, u8, u8) {
     if i < 16 {
-        return XTERM_BASE[i as usize];
+        return palette[i as usize];
     }
     if i < 232 {
         const LEVELS: [u8; 6] = [0, 95, 135, 175, 215, 255];
@@ -1340,6 +1395,7 @@ fn lookup_named(
     colors: &Colors,
     default_fg: (u8, u8, u8),
     default_bg: (u8, u8, u8),
+    palette: &[(u8, u8, u8); 16],
 ) -> (u8, u8, u8) {
     if let Some(Rgb { r, g, b }) = colors[named] {
         return (r, g, b);
@@ -1350,18 +1406,18 @@ fn lookup_named(
         NamedColor::Cursor => default_fg,
         NamedColor::BrightForeground => default_fg,
         NamedColor::DimForeground => dim_rgb(default_fg),
-        NamedColor::DimBlack => dim_rgb(XTERM_BASE[0]),
-        NamedColor::DimRed => dim_rgb(XTERM_BASE[1]),
-        NamedColor::DimGreen => dim_rgb(XTERM_BASE[2]),
-        NamedColor::DimYellow => dim_rgb(XTERM_BASE[3]),
-        NamedColor::DimBlue => dim_rgb(XTERM_BASE[4]),
-        NamedColor::DimMagenta => dim_rgb(XTERM_BASE[5]),
-        NamedColor::DimCyan => dim_rgb(XTERM_BASE[6]),
-        NamedColor::DimWhite => dim_rgb(XTERM_BASE[7]),
+        NamedColor::DimBlack => dim_rgb(palette[0]),
+        NamedColor::DimRed => dim_rgb(palette[1]),
+        NamedColor::DimGreen => dim_rgb(palette[2]),
+        NamedColor::DimYellow => dim_rgb(palette[3]),
+        NamedColor::DimBlue => dim_rgb(palette[4]),
+        NamedColor::DimMagenta => dim_rgb(palette[5]),
+        NamedColor::DimCyan => dim_rgb(palette[6]),
+        NamedColor::DimWhite => dim_rgb(palette[7]),
         other => {
             let idx = other as usize;
             if idx < 16 {
-                XTERM_BASE[idx]
+                palette[idx]
             } else {
                 default_fg
             }
@@ -1383,6 +1439,7 @@ fn resolve_color(
     dim: bool,
     default_fg: (u8, u8, u8),
     default_bg: (u8, u8, u8),
+    palette: &[(u8, u8, u8); 16],
 ) -> (u8, u8, u8) {
     match color {
         AnsiColor::Named(mut named) => {
@@ -1392,12 +1449,12 @@ fn resolve_color(
             if is_fg && dim {
                 named = named.to_dim();
             }
-            lookup_named(named, colors, default_fg, default_bg)
+            lookup_named(named, colors, default_fg, default_bg, palette)
         }
         AnsiColor::Indexed(i) => {
             let rgb = colors[i as usize]
                 .map(|Rgb { r, g, b }| (r, g, b))
-                .unwrap_or_else(|| xterm_indexed(i));
+                .unwrap_or_else(|| xterm_indexed(i, palette));
             if is_fg && dim {
                 dim_rgb(rgb)
             } else {
@@ -1417,6 +1474,7 @@ fn resolve_color(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Theme;
 
     fn feed(term: &mut Term<TitleListener>, text: &str) {
         let mut processor: vte::ansi::Processor = Default::default();
@@ -1441,7 +1499,7 @@ mod tests {
         feed(&mut term, "line-49");
 
         // Live view shows the last 10 content lines.
-        let (rows, _) = render_term_rows(&term, WHITE, BLACK, false);
+        let (rows, _) = render_term_rows(&term, WHITE, BLACK, false, &XTERM_BASE, WHITE);
         assert_eq!(rows.len(), 10);
         assert_eq!(rows[0].text, "line-40");
         assert_eq!(rows[9].text, "line-49");
@@ -1449,7 +1507,7 @@ mod tests {
         // Scroll up 5: viewport shows older history, top-first.
         term.scroll_display(Scroll::Delta(5));
         assert_eq!(term.grid().display_offset(), 5);
-        let (rows, _) = render_term_rows(&term, WHITE, BLACK, false);
+        let (rows, _) = render_term_rows(&term, WHITE, BLACK, false, &XTERM_BASE, WHITE);
         assert_eq!(rows.len(), 10);
         for r in &rows {
             println!("|{}|", r.text);
@@ -1460,7 +1518,7 @@ mod tests {
         // Back to bottom restores the live view.
         term.scroll_display(Scroll::Bottom);
         assert_eq!(term.grid().display_offset(), 0);
-        let (rows, _) = render_term_rows(&term, WHITE, BLACK, false);
+        let (rows, _) = render_term_rows(&term, WHITE, BLACK, false, &XTERM_BASE, WHITE);
         assert_eq!(rows[0].text, "line-40");
         assert_eq!(rows[9].text, "line-49");
     }
@@ -1482,12 +1540,28 @@ mod tests {
             .unwrap()
             .update(Point::new(Line(0), Column(4)), Side::Right);
 
-        let (rows, _) = render_term_rows(&term, WHITE, BLACK, false);
+        let (rows, _) = render_term_rows(&term, WHITE, BLACK, false, &XTERM_BASE, WHITE);
         assert_eq!(rows[0].text, "hello world");
         assert_eq!(rows[0].sel_cols, Some((0, 4)));
         assert_eq!(rows[1].sel_cols, None);
     }
 
+    /// Explicit SGR backgrounds and INVERSE emit exact-column bg rects.
+    #[test]
+    fn colored_bg_emits_rects() {
+        let size = TermSize { cols: 20, rows: 10 };
+        let mut term = Term::new(TermConfig::default(), &size, TitleListener::headless("tab-0").0);
+        // Red on xterm blue, then default colors.
+        feed(&mut term, "\x1b[31;44mhi\x1b[0m ok");
+        // Inverse video on defaults: bg becomes light, fg dark.
+        feed(&mut term, "\r\n\x1b[7mrev\x1b[0m");
+
+        let (rows, _) = render_term_rows(&term, WHITE, BLACK, false, &XTERM_BASE, WHITE);
+        assert_eq!(rows[0].text, "hi ok");
+        assert_eq!(rows[0].bg_rects, vec![(0, 1, (0, 0, 238))]);
+        assert_eq!(rows[1].text, "rev");
+        assert_eq!(rows[1].bg_rects, vec![(0, 2, (255, 255, 255))]);
+    }
 
     /// OSC 0/2 sequences rename the tab live; reset restores the fallback.
     #[test]
@@ -1503,6 +1577,21 @@ mod tests {
         assert_eq!(*slot.lock().unwrap(), "second");
     }
 
+    /// Named colors resolve through the theme palette, not the xterm table.
+    #[test]
+    fn theme_palette_overrides_named_colors() {
+        let size = TermSize { cols: 20, rows: 10 };
+        let mut term = Term::new(TermConfig::default(), &size, TitleListener::headless("tab-0").0);
+        feed(&mut term, "\x1b[31mred\x1b[0m \x1b[38;5;1midx");
+        let palette = Theme::default().palette_rgb();
+        // Tokyo Night red, not xterm red.
+        assert_eq!(palette[1], (247, 118, 142));
+        let (rows, _) = render_term_rows(&term, WHITE, BLACK, false, &palette, WHITE);
+        assert_eq!(rows[0].text, "red idx");
+        // SGR 31 and 38;5;1 agree (named + indexed paths).
+        assert_eq!(rows[0].spans[0].1.fg, (247, 118, 142));
+        assert_eq!(rows[0].spans[2].1.fg, (247, 118, 142));
+    }
 
     fn rect(col: usize, row: usize, cols: usize, rows: usize) -> CellRect {
         CellRect { col, row, cols, rows }

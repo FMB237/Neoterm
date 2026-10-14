@@ -39,6 +39,8 @@ struct App {
     tabs: Option<Tabs>,
     cfg: NeotermConfig,
     mods: Modifiers,
+    config_rx: Option<std::sync::mpsc::Receiver<()>>,
+    _watcher: Option<notify::RecommendedWatcher>,
     blink_on: bool,
     last_blink: Instant,
     proxy: EventLoopProxy<()>,
@@ -96,6 +98,8 @@ impl App {
             tabs: None,
             cfg,
             mods: Modifiers::default(),
+            config_rx: None,
+            _watcher: None,
             blink_on: true,
             last_blink: Instant::now(),
             proxy,
@@ -117,6 +121,64 @@ impl App {
             press_local: None,
             split_drag: None,
             split_cursor: None,
+        }
+    }
+
+    fn setup_config_watch(&mut self) {
+        let Some(path) = NeotermConfig::path() else {
+            return;
+        };
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let mut watcher =
+            match notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
+                if res.is_ok() {
+                    let _ = tx.send(());
+                }
+            }) {
+                Ok(w) => w,
+                Err(_) => return,
+            };
+        use notify::Watcher;
+        if watcher
+            .watch(&path, notify::RecursiveMode::NonRecursive)
+            .is_ok()
+        {
+            self.config_rx = Some(rx);
+            self._watcher = Some(watcher);
+        } else if let Some(parent) = path.parent() {
+            // Watch parent dir if file doesn't exist yet.
+            if watcher
+                .watch(parent, notify::RecursiveMode::NonRecursive)
+                .is_ok()
+            {
+                self.config_rx = Some(rx);
+                self._watcher = Some(watcher);
+            }
+        }
+    }
+
+    fn poll_config_reload(&mut self) {
+        let dirty = match &self.config_rx {
+            Some(rx) => rx.try_iter().next().is_some(),
+            None => false,
+        };
+        if dirty {
+            // Debounce: wait a moment for editors finishing writes.
+            std::thread::sleep(Duration::from_millis(50));
+            let new_cfg = NeotermConfig::load();
+            log::info!("config reloaded");
+            self.cfg = new_cfg;
+            if let Some(r) = self.renderer.as_mut() {
+                r.apply_config(&self.cfg);
+            }
+            if let Some(t) = self.tabs.as_mut() {
+                t.apply_config(&self.cfg);
+            }
+            // Config affects colors/metrics: force next redraw to present.
+            self.force_draw = true;
+            if let Some(w) = self.window.as_ref() {
+                w.request_redraw();
+            }
         }
     }
 
@@ -807,6 +869,7 @@ impl ApplicationHandler for App {
         self.window = Some(window);
         self.renderer = Some(renderer);
         self.tabs = Some(tabs);
+        self.setup_config_watch();
 
         {
             let (cols, rows) = self.estimate_grid(size.width, size.height);
@@ -1052,6 +1115,7 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.poll_config_reload();
         // Strip show/hide reflows the grid (body reclaims the strip
         // height), same as a window resize. Runs here (no live borrows)
         // rather than in the redraw arm.

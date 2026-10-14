@@ -172,6 +172,13 @@ impl Tabs {
         self.tabs.iter().any(|t| t.take_dirty())
     }
 
+    /// Refresh theme colors on all tabs after a config reload.
+    pub fn apply_config(&mut self, cfg: &NeotermConfig) {
+        for t in &mut self.tabs {
+            t.apply_config(cfg);
+        }
+    }
+
     pub fn resize_all(&mut self, cols: u16, rows: u16) {
         self.cols = cols;
         self.rows = rows;

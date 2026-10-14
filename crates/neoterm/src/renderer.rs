@@ -230,13 +230,13 @@ impl Renderer {
             bg: cfg.bg_wgpu(),
             fg: cfg.fg_glyphon(),
             font_size,
-            sel_bg: hex_quad("#33467c"),
-            track_bg: hex_quad("#16161e"),
-            thumb_bg: hex_quad("#3b4261"),
-            strip_bg: hex_quad("#1a1b26"),
-            tab_active_fg: glyphon::Color::rgb(0x7a, 0xa2, 0xf7),
-            tab_inactive_fg: glyphon::Color::rgb(0x56, 0x5f, 0x89),
-            tab_close_fg: glyphon::Color::rgb(0x73, 0x7a, 0xa2),
+            sel_bg: cfg.theme.selection_quad(),
+            track_bg: cfg.theme.scrollbar_track_quad(),
+            thumb_bg: cfg.theme.scrollbar_thumb_quad(),
+            strip_bg: cfg.theme.tab_bar_bg_quad(),
+            tab_active_fg: cfg.theme.tab_active_fg_glyphon(),
+            tab_inactive_fg: cfg.theme.tab_inactive_fg_glyphon(),
+            tab_close_fg: cfg.theme.tab_close_fg_glyphon(),
             last_tab_text: String::new(),
             measured_advance: None,
             bg_pipeline,
@@ -258,6 +258,32 @@ impl Renderer {
         self.window.request_redraw();
     }
 
+    pub fn apply_config(&mut self, cfg: &NeotermConfig) {
+        self.bg = cfg.bg_wgpu();
+        self.fg = cfg.fg_glyphon();
+        self.sel_bg = cfg.theme.selection_quad();
+        self.track_bg = cfg.theme.scrollbar_track_quad();
+        self.thumb_bg = cfg.theme.scrollbar_thumb_quad();
+        self.strip_bg = cfg.theme.tab_bar_bg_quad();
+        self.tab_active_fg = cfg.theme.tab_active_fg_glyphon();
+        self.tab_inactive_fg = cfg.theme.tab_inactive_fg_glyphon();
+        self.tab_close_fg = cfg.theme.tab_close_fg_glyphon();
+        // Any config change forces re-shape (colors/font may differ).
+        self.last_tab_text.clear();
+        self.pane_rows.clear();
+        if (cfg.font_size - self.font_size).abs() > f32::EPSILON {
+            self.font_size = cfg.font_size;
+            let m = Metrics::new(self.font_size, self.font_size * 1.35);
+            for bufs in self.pane_buffers.values_mut() {
+                for buf in bufs {
+                    buf.set_metrics(m);
+                }
+            }
+            let m2 = Metrics::new(self.font_size, self.font_size * 1.3);
+            self.tab_buffer.set_metrics(m2);
+            self.measured_advance = None;
+        }
+    }
 
     /// Line height in physical pixels at the current scale.
     fn line_height(&self, scale: f32) -> f32 {
@@ -493,6 +519,30 @@ impl Renderer {
             let ox = body_left + pane.rect.col as f32 * cell_w;
             let oy = body_top + pane.rect.row as f32 * line_h;
             for (i, row) in pane.rows.iter().enumerate() {
+                let y0 = oy + i as f32 * line_h;
+                let y1 = y0 + line_h;
+                for (lo, hi, (r, g, b)) in &row.bg_rects {
+                    push_quad(
+                        &mut bg_verts,
+                        ox + *lo as f32 * cell_w,
+                        y0,
+                        ox + (*hi + 1) as f32 * cell_w,
+                        y1,
+                        w as f32,
+                        h as f32,
+                        [
+                            *r as f32 / 255.0,
+                            *g as f32 / 255.0,
+                            *b as f32 / 255.0,
+                        ],
+                    );
+                }
+            }
+        }
+        for pane in panes {
+            let ox = body_left + pane.rect.col as f32 * cell_w;
+            let oy = body_top + pane.rect.row as f32 * line_h;
+            for (i, row) in pane.rows.iter().enumerate() {
                 let Some((lo, hi)) = row.sel_cols else {
                     continue;
                 };
@@ -693,15 +743,6 @@ impl Renderer {
         self.atlas.trim();
     }
 
-}
-
-/// Fixed UI colors before themes landed: `#rrggbb` -> 0..1 RGB.
-fn hex_quad(hex: &str) -> [f32; 3] {
-    let s = hex.trim_start_matches('#');
-    let ch = |i: usize| {
-        u8::from_str_radix(s.get(i..i + 2).unwrap_or("00"), 16).unwrap_or(0) as f32 / 255.0
-    };
-    [ch(0), ch(2), ch(4)]
 }
 
 /// Append a solid-color quad (two triangles) in NDC coordinates.
