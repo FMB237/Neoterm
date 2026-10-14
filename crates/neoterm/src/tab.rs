@@ -303,8 +303,34 @@ impl Pane {
     ///
     /// Stage 3 is keys-only with no mouse selection yet, so nothing ever
     /// sets `term.selection` — the fallback is the working path until
+    /// mouse drag-select (Stage 4) lands.
+    pub fn copy_text(&self) -> Option<String> {
+        let Ok(term) = self.term.lock() else {
+            return None;
+        };
+        if term.selection.is_some() {
+            return term.selection_to_string().filter(|s| !s.is_empty());
+        }
+        let cols = term.columns().max(1);
+        let rows = term.screen_lines().max(1);
+        // Copy what is visible: viewport row r is grid line (r - offset).
+        let offset = term.grid().display_offset() as i32;
+        let text = term.bounds_to_string(
+            Point::new(Line(-offset), Column(0)),
+            Point::new(Line(rows as i32 - 1 - offset), Column(cols - 1)),
+        );
+        if text.trim().is_empty() {
+            None
+        } else {
+            Some(text)
+        }
+    }
 
     /// Whether the running app asked for bracketed paste (`\e[?2004h`).
+    pub fn bracketed_paste(&self) -> bool {
+        self.term_mode().contains(TermMode::BRACKETED_PASTE)
+    }
+
     /// Copy of the terminal mode flags (mouse reporting, alt screen, ...).
     pub fn term_mode(&self) -> TermMode {
         let Ok(term) = self.term.lock() else {
@@ -400,6 +426,13 @@ impl Pane {
     }
 
     /// Whether a local selection is currently active.
+    pub fn has_selection(&self) -> bool {
+        let Ok(term) = self.term.lock() else {
+            return false;
+        };
+        term.selection.is_some()
+    }
+
     /// Snapshot visible rows with resolved per-cell styles.
     ///
     /// Wide-char spacers are skipped (the leading char already occupies both
@@ -1063,6 +1096,20 @@ impl Tab {
             }
         }
         any
+    }
+
+    pub fn copy_text(&self) -> Option<String> {
+        self.active_pane()?.copy_text()
+    }
+
+    pub fn has_selection(&self) -> bool {
+        self.active_pane().map(|p| p.has_selection()).unwrap_or(false)
+    }
+
+    pub fn bracketed_paste(&self) -> bool {
+        self.active_pane()
+            .map(|p| p.bracketed_paste())
+            .unwrap_or(false)
     }
 
     pub fn term_mode(&self) -> TermMode {

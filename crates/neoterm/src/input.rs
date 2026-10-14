@@ -9,6 +9,10 @@ pub enum InputAction {
     NextTab,
     PrevTab,
     SelectTab(usize),
+    /// Copy active selection (or visible screen) to the OS clipboard.
+    Copy,
+    /// Paste OS clipboard text into the PTY.
+    Paste,
     /// Scroll viewport one page (local scrollback, not sent to the app).
     ScrollPageUp,
     ScrollPageDown,
@@ -58,6 +62,8 @@ pub fn map_key(event: &KeyEvent, mods: &Modifiers, alt_screen: bool) -> InputAct
                 "W" => return InputAction::ClosePane,
                 "N" => return InputAction::NextTab,
                 "P" => return InputAction::PrevTab,
+                "C" => return InputAction::Copy,
+                "V" => return InputAction::Paste,
                 "E" => return InputAction::SplitV,
                 "O" => return InputAction::SplitH,
                 "Z" => return InputAction::ZoomPane,

@@ -12,6 +12,7 @@ use alacritty_terminal::index::{Column, Line, Point, Side};
 use alacritty_terminal::selection::SelectionType;
 use alacritty_terminal::term::TermMode;
 use anyhow::Result;
+use arboard::{Clipboard, GetExtLinux, LinuxClipboardKind, SetExtLinux};
 use clap::Parser;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
@@ -51,6 +52,10 @@ struct App {
     force_draw: bool,
     /// Last seen strip visibility (drives grid reflow on show/hide).
     last_strip: bool,
+    /// Long-lived clipboard handle. On X11 the clipboard content is hosted
+    /// by our process, so this is kept alive for the whole session instead
+    /// of opening/closing per operation.
+    clipboard: Option<Clipboard>,
     // ---- mouse state (Stage 4) ----
     /// Last known cursor position in physical pixels.
     cursor_pos: Option<PhysicalPosition<f64>>,
@@ -108,6 +113,7 @@ impl App {
             last_blink_on: false,
             force_draw: true, // ensure first paint
             last_strip: true,
+            clipboard: None,
             cursor_pos: None,
             selecting: false,
             left_held: false,
@@ -121,6 +127,123 @@ impl App {
             press_local: None,
             split_drag: None,
             split_cursor: None,
+        }
+    }
+
+    /// Lazily opened clipboard; failures (headless, no X11/Wayland
+    /// connection) are logged once and never fatal.
+    fn clipboard(&mut self) -> Option<&mut Clipboard> {
+        if self.clipboard.is_none() {
+            match Clipboard::new() {
+                Ok(cb) => self.clipboard = Some(cb),
+                Err(e) => {
+                    log::error!("clipboard unavailable: {e}");
+                    return None;
+                }
+            }
+        }
+        self.clipboard.as_mut()
+    }
+
+    fn do_copy(&mut self) {
+        let text = match self.tabs.as_ref().and_then(|t| t.active()) {
+            Some(tab) => match tab.copy_text() {
+                Some(s) => s,
+                None => return,
+            },
+            None => return,
+        };
+        match self.clipboard() {
+            Some(cb) => {
+                if let Err(e) = cb.set_text(text) {
+                    log::error!("copy failed: {e}");
+                }
+            }
+            None => log::error!("copy failed: no clipboard"),
+        }
+    }
+
+    fn do_paste(&mut self) {
+        let text = match self.clipboard() {
+            Some(cb) => match cb.get_text() {
+                Ok(s) => s,
+                Err(e) => {
+                    log::error!("paste failed: {e}");
+                    return;
+                }
+            },
+            None => return,
+        };
+        self.write_paste(text);
+    }
+
+    /// X11 middle-click: paste the PRIMARY selection buffer.
+    fn do_paste_primary(&mut self) {
+        let text = match self.clipboard() {
+            Some(cb) => match cb.get().clipboard(LinuxClipboardKind::Primary).text() {
+                Ok(s) => s,
+                Err(e) => {
+                    log::error!("primary paste failed: {e}");
+                    return;
+                }
+            },
+            None => return,
+        };
+        self.write_paste(text);
+    }
+
+    /// X11 select-to-copy: mirror the active selection into PRIMARY so
+    /// middle-click pastes it anywhere on the desktop.
+    fn copy_primary(&mut self) {
+        let has_sel = self
+            .tabs
+            .as_ref()
+            .and_then(|t| t.active())
+            .map(|tab| tab.has_selection())
+            .unwrap_or(false);
+        if !has_sel {
+            return;
+        }
+        let text = match self
+            .tabs
+            .as_ref()
+            .and_then(|t| t.active())
+            .and_then(|tab| tab.copy_text())
+        {
+            Some(s) => s,
+            None => return,
+        };
+        match self.clipboard() {
+            Some(cb) => {
+                if let Err(e) = cb
+                    .set()
+                    .clipboard(LinuxClipboardKind::Primary)
+                    .text(text)
+                {
+                    log::error!("primary copy failed: {e}");
+                }
+            }
+            None => log::error!("primary copy failed: no clipboard"),
+        }
+    }
+
+    /// Shared paste core: normalize newlines, honor bracketed paste.
+    fn write_paste(&mut self, text: String) {
+        if text.is_empty() {
+            return;
+        }
+        let Some(tab) = self.tabs.as_ref().and_then(|t| t.active()) else {
+            return;
+        };
+        // Normalize newlines for the PTY; honor bracketed paste when the
+        // running app requested it (e.g. vim, readline).
+        let body = text.replace("\r\n", "\r").replace('\n', "\r");
+        if tab.bracketed_paste() {
+            tab.write(b"\x1b[200~");
+            tab.write(body.as_bytes());
+            tab.write(b"\x1b[201~");
+        } else {
+            tab.write(body.as_bytes());
         }
     }
 
@@ -549,6 +672,8 @@ impl App {
                     }
                 }
             }
+            // X11 tradition: whatever selection remains owns PRIMARY.
+            self.copy_primary();
             self.force_draw = true;
             self.request_redraw();
             self.press_pane = None;
@@ -617,7 +742,9 @@ impl App {
             self.press_app_middle = true;
             self.press_pane = Some(pid);
             self.press_local = Some((col, vrow));
+            return;
         }
+        self.do_paste_primary();
     }
 
     fn on_middle_release(&mut self) {
@@ -990,6 +1117,8 @@ impl ApplicationHandler for App {
                             w.request_redraw();
                         }
                     }
+                    InputAction::Copy => self.do_copy(),
+                    InputAction::Paste => self.do_paste(),
                     InputAction::ScrollPageUp => {
                         if let Some(tab) = self.tabs.as_ref().and_then(|t| t.active()) {
                             tab.scroll_page(true);
