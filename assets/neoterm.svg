@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <!-- NeoTerm icon: Tokyo Night terminal with tab strip and prompt -->
+  <rect x="8" y="8" width="112" height="112" rx="24" fill="#1a1b26"/>
+  <rect x="8" y="8" width="112" height="112" rx="24" fill="none" stroke="#414868" stroke-width="4"/>
+  <!-- tab strip -->
+  <rect x="26" y="28" width="52" height="14" rx="7" fill="#292e42"/>
+  <circle cx="66" cy="35" r="3" fill="#737aa2"/>
+  <text x="88" y="41" font-family="monospace" font-size="14" fill="#565f89">+</text>
+  <!-- prompt -->
+  <text x="26" y="76" font-family="monospace" font-size="24" font-weight="bold" fill="#9ece6a">$</text>
+  <rect x="46" y="60" width="14" height="20" fill="#7aa2f7"/>
+  <!-- accent baseline -->
+  <rect x="26" y="94" width="76" height="6" rx="3" fill="#7aa2f7"/>
+</svg>

@@ -1,1 +1,2 @@
-exec neoterm "$@"
+#!/bin/bash
+./target/release/neoterm

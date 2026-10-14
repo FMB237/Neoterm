@@ -1,0 +1,11 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=NeoTerm
+GenericName=Terminal Emulator
+Comment=GPU terminal with tabs and themes (NeoTerm 0.2)
+Exec=neoterm
+Icon=neoterm
+Terminal=false
+Categories=System;TerminalEmulator;
+Keywords=shell;prompt;terminal;tabs;

@@ -1,3 +1,13 @@
+# Rust build artifacts
 /target
 **/target
+
+# Editor / OS noise
 *.rs.bk
+*.swp
+.idea/
+.vscode/
+.DS_Store
+
+# Local runtime state
+*.log

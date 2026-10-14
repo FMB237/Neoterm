@@ -1,8 +1,8 @@
 [package]
 name = "neoterm"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-description = "NeoTerm - GPU terminal (pure Rust)"
+description = "NeoTerm v0.2 - GPU terminal with tabs + themes (pure Rust)"
 
 [[bin]]
 name = "neoterm"
@@ -26,4 +26,3 @@ dirs = "5"
 notify = "6"
 pollster = "0.4"
 bytemuck = "1"
-arboard = "3"

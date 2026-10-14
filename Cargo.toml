@@ -1,3 +1,10 @@
 [workspace]
 members = ["crates/neoterm"]
 resolver = "2"
+
+[profile.release]
+# Stage 2 perf: max runtime speed at the cost of slower release builds.
+# Debug builds are unaffected.
+lto = true
+codegen-units = 1
+strip = true

@@ -1,0 +1,740 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use bytemuck::{Pod, Zeroable};
+use cosmic_text::{AttrsList, BufferLine, LineEnding, Style, Weight};
+use glyphon::{
+    Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping, SwashCache,
+    TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
+};
+use wgpu::{
+    CommandEncoderDescriptor, CompositeAlphaMode, Device, DeviceDescriptor, Instance,
+    InstanceDescriptor, LoadOp, MultisampleState, Operations, PresentMode,
+    RenderPassColorAttachment, RenderPassDescriptor, RequestAdapterOptions, Surface,
+    SurfaceConfiguration, TextureFormat, TextureUsages, TextureViewDescriptor,
+};
+use winit::window::Window;
+
+use crate::config::NeotermConfig;
+use crate::mouse;
+use crate::tab::{CellRect, PaneId, RowContent};
+
+/// One pane's drawable content for a frame: grid rect (body-relative
+/// cells) plus resolved rows. Built per frame in main from the tab layout.
+pub struct PaneDraw {
+    pub id: PaneId,
+    pub rect: CellRect,
+    pub rows: Vec<RowContent>,
+}
+
+/// Viewport scroll state driving the scrollbar (built per frame in main).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScrollState {
+    /// Total scrollback history lines.
+    pub history: usize,
+    /// Lines scrolled up (0 = live view).
+    pub offset: usize,
+    /// Viewport height in rows.
+    pub rows: usize,
+    /// Active pane rect (grid cells): the track lives inside it.
+    /// None falls back to the full body (should not happen in practice).
+    pub pane: Option<CellRect>,
+}
+
+/// Max background rects per frame: selection + scrollbar + per-cell bg.
+/// Rows clamp at 200 and vivid apps rarely exceed a few segments per row;
+/// overflow is truncated (documented, never crashes).
+const MAX_BG_RECTS: usize = 2048;
+const SEL_VERTS_PER_RECT: usize = 6;
+const SEL_FLOATS_PER_VERT: usize = 5;
+
+/// One colored 2D vertex for the selection-background pass.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+struct SelVertex {
+    pos: [f32; 2],
+    col: [f32; 3],
+}
+
+const SEL_SHADER: &str = r#"
+struct Vin {
+    @location(0) pos: vec2<f32>,
+    @location(1) col: vec3<f32>,
+};
+struct Vout {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) col: vec3<f32>,
+};
+@vertex
+fn vs(v: Vin) -> Vout {
+    var o: Vout;
+    o.pos = vec4<f32>(v.pos, 0.0, 1.0);
+    o.col = v.col;
+    return o;
+}
+@fragment
+fn fs(@location(0) col: vec3<f32>) -> @location(0) vec4<f32> {
+    return vec4<f32>(col, 1.0);
+}
+"#;
+
+pub struct Renderer {
+    device: Device,
+    queue: wgpu::Queue,
+    surface: Surface<'static>,
+    surface_config: SurfaceConfiguration,
+    instance: Instance,
+    font_system: FontSystem,
+    swash_cache: SwashCache,
+    viewport: Viewport,
+    atlas: TextAtlas,
+    text_renderer: TextRenderer,
+    tab_buffer: Buffer,
+    /// Text buffers + shaped-row caches per pane id (rebuilt on row-count
+    /// change; pruned when panes close).
+    pane_buffers: HashMap<PaneId, Vec<Buffer>>,
+    pane_rows: HashMap<PaneId, Vec<RowContent>>,
+    window: Arc<Window>,
+    bg: wgpu::Color,
+    fg: Color,
+    font_size: f32,
+    /// Theme quad colors (0..1 RGB): selection, scrollbar, tab strip.
+    sel_bg: [f32; 3],
+    track_bg: [f32; 3],
+    thumb_bg: [f32; 3],
+    strip_bg: [f32; 3],
+    /// Tab-strip text colors: active / inactive / close mark.
+    tab_active_fg: Color,
+    tab_inactive_fg: Color,
+    tab_close_fg: Color,
+    // Perf gate: skip cosmic-text shaping when content is unchanged.
+    last_tab_text: String,
+    /// Measured monospace advance in layout units (None until a non-empty
+    /// row has been shaped; falls back to the 0.62 heuristic).
+    measured_advance: Option<f32>,
+    /// Solid-rect pipeline for backgrounds (cell bg, selection, scrollbar).
+    bg_pipeline: wgpu::RenderPipeline,
+    bg_buffer: wgpu::Buffer,
+}
+
+impl Renderer {
+    pub async fn new(
+        window: Arc<Window>,
+        event_loop: &winit::event_loop::ActiveEventLoop,
+        cfg: &NeotermConfig,
+    ) -> Self {
+        let physical_size = window.inner_size();
+
+        let instance = Instance::new(InstanceDescriptor::new_with_display_handle(Box::new(
+            event_loop.owned_display_handle(),
+        )));
+        let adapter = instance
+            .request_adapter(&RequestAdapterOptions::default())
+            .await
+            .expect("no GPU adapter");
+        let (device, queue) = adapter
+            .request_device(&DeviceDescriptor::default())
+            .await
+            .expect("request device");
+
+        let surface = instance
+            .create_surface(window.clone())
+            .expect("create surface");
+        let swapchain_format = TextureFormat::Bgra8UnormSrgb;
+        let surface_config = SurfaceConfiguration {
+            usage: TextureUsages::RENDER_ATTACHMENT,
+            format: swapchain_format,
+            width: physical_size.width.max(1),
+            height: physical_size.height.max(1),
+            present_mode: PresentMode::Fifo,
+            alpha_mode: CompositeAlphaMode::Opaque,
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
+            color_space: wgpu::SurfaceColorSpace::Auto,
+        };
+        surface.configure(&device, &surface_config);
+
+        let mut font_system = FontSystem::new();
+        let swash_cache = SwashCache::new();
+        let cache = Cache::new(&device);
+        let viewport = Viewport::new(&device, &cache);
+        let mut atlas = TextAtlas::new(&device, &queue, &cache, swapchain_format);
+        let text_renderer =
+            TextRenderer::new(&mut atlas, &device, MultisampleState::default(), None);
+
+        let font_size = cfg.font_size;
+        let mut tab_buffer = Buffer::new(&mut font_system, Metrics::new(font_size, font_size * 1.3));
+        tab_buffer.set_size(Some(2000.0), Some(40.0));
+
+        // Solid-rect pipeline for selection backgrounds.
+        let sel_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("neoterm-bg"),
+            source: wgpu::ShaderSource::Wgsl(SEL_SHADER.into()),
+        });
+        let sel_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("neoterm-bg-layout"),
+            bind_group_layouts: &[],
+            immediate_size: 0,
+        });
+        let bg_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("neoterm-bg"),
+            layout: Some(&sel_layout),
+            vertex: wgpu::VertexState {
+                module: &sel_shader,
+                entry_point: Some("vs"),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: (SEL_FLOATS_PER_VERT * 4) as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x3],
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &sel_shader,
+                entry_point: Some("fs"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: swapchain_format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let bg_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("neoterm-bg-verts"),
+            size: (MAX_BG_RECTS * SEL_VERTS_PER_RECT * SEL_FLOATS_PER_VERT * 4) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let renderer = Self {
+            device,
+            queue,
+            surface,
+            surface_config,
+            instance,
+            font_system,
+            swash_cache,
+            viewport,
+            atlas,
+            text_renderer,
+            tab_buffer,
+            pane_buffers: HashMap::new(),
+            pane_rows: HashMap::new(),
+            window,
+            bg: cfg.bg_wgpu(),
+            fg: cfg.fg_glyphon(),
+            font_size,
+            sel_bg: hex_quad("#33467c"),
+            track_bg: hex_quad("#16161e"),
+            thumb_bg: hex_quad("#3b4261"),
+            strip_bg: hex_quad("#1a1b26"),
+            tab_active_fg: glyphon::Color::rgb(0x7a, 0xa2, 0xf7),
+            tab_inactive_fg: glyphon::Color::rgb(0x56, 0x5f, 0x89),
+            tab_close_fg: glyphon::Color::rgb(0x73, 0x7a, 0xa2),
+            last_tab_text: String::new(),
+            measured_advance: None,
+            bg_pipeline,
+            bg_buffer,
+        };
+        renderer
+    }
+
+    pub fn resize(&mut self, width: u32, height: u32) {
+        if width == 0 || height == 0 {
+            return;
+        }
+        self.surface_config.width = width;
+        self.surface_config.height = height;
+        self.surface.configure(&self.device, &self.surface_config);
+        // Force a re-shape next frame (scale may have changed).
+        self.last_tab_text.clear();
+        self.pane_rows.clear();
+        self.window.request_redraw();
+    }
+
+
+    /// Line height in physical pixels at the current scale.
+    fn line_height(&self, scale: f32) -> f32 {
+        self.font_size * 1.35 * scale
+    }
+
+    /// Monospace advance in layout units: measured from shaped glyphs when
+    /// available, otherwise the 0.62em heuristic.
+    fn advance(&self) -> f32 {
+        self.measured_advance.unwrap_or(self.font_size * 0.62)
+    }
+
+    /// Terminal body geometry in physical pixels: (cell_w, line_h, left, top).
+    /// Must stay in sync with the TextArea placement in `draw`.
+    /// `strip` = tab strip visible: hidden strips give the body the full
+    /// window minus a small top padding.
+    pub fn body_geometry(&self, scale: f32, strip: bool) -> (f32, f32, f32, f32) {
+        (
+            self.advance() * scale,
+            self.line_height(scale),
+            8.0 * scale,
+            if strip { 30.0 * scale } else { 8.0 * scale },
+        )
+    }
+
+    /// Build a cosmic-text attrs list for one row: default fg + per-span
+    /// overrides (color, bold, italic).
+    fn row_attrs(defaults: &Attrs, row: &RowContent) -> AttrsList {
+        let mut list = AttrsList::new(defaults);
+        for (range, style) in &row.spans {
+            let (r, g, b) = style.fg;
+            let mut attrs = Attrs::new()
+                .family(Family::Monospace)
+                .color(Color::rgb(r, g, b));
+            if style.bold {
+                attrs = attrs.weight(Weight::BOLD);
+            }
+            if style.italic {
+                attrs = attrs.style(Style::Italic);
+            }
+            list.add_span(range.clone(), &attrs);
+        }
+        list
+    }
+
+    pub fn draw(
+        &mut self,
+        titles: &[String],
+        active: usize,
+        panes: &[PaneDraw],
+        dividers: &[CellRect],
+        scroll: ScrollState,
+        strip: bool,
+    ) {
+        let scale = self.window.scale_factor() as f32;
+        let w = self.surface_config.width;
+        let h = self.surface_config.height;
+
+        self.viewport.update(
+            &self.queue,
+            Resolution {
+                width: w,
+                height: h,
+            },
+        );
+
+        // Tab bar text (single source of truth shared with hit-testing),
+        // styled in pieces: active segment bold + accent, close marks and
+        // the `+` mark muted, everything else dimmed inactive.
+        let mut tab_text = mouse::tab_bar_text(titles, active);
+        if tab_text.is_empty() {
+            tab_text = " NeoTerm ".to_string();
+        }
+        if tab_text != self.last_tab_text {
+            let (active_range, x_ranges, plus_range) = mouse::tab_span_ranges(titles, active);
+            let base = Attrs::new()
+                .family(Family::Monospace)
+                .color(self.tab_inactive_fg);
+            let active_attrs = Attrs::new()
+                .family(Family::Monospace)
+                .color(self.tab_active_fg)
+                .weight(Weight::BOLD);
+            let close_attrs = Attrs::new()
+                .family(Family::Monospace)
+                .color(self.tab_close_fg);
+            // Partition the text at every span edge; each piece takes the
+            // innermost style (close mark wins inside the active segment).
+            let mut cuts = vec![
+                0,
+                tab_text.len(),
+                active_range.start,
+                active_range.end,
+                plus_range.start,
+                plus_range.end,
+            ];
+            for xr in &x_ranges {
+                cuts.push(xr.start);
+                cuts.push(xr.end);
+            }
+            cuts.sort_unstable();
+            cuts.dedup();
+            let spans: Vec<(&str, Attrs)> = cuts
+                .windows(2)
+                .filter_map(|w| {
+                    let (a, b) = (w[0], w[1]);
+                    if a >= b {
+                        return None;
+                    }
+                    let piece = tab_text.get(a..b)?;
+                    let in_active = active_range.start < active_range.end
+                        && a >= active_range.start
+                        && b <= active_range.end;
+                    let is_x = x_ranges.iter().any(|xr| a >= xr.start && b <= xr.end);
+                    let is_plus = plus_range.start < plus_range.end
+                        && a >= plus_range.start
+                        && b <= plus_range.end;
+                    let attrs = if is_x || is_plus {
+                        close_attrs.clone()
+                    } else if in_active {
+                        active_attrs.clone()
+                    } else {
+                        base.clone()
+                    };
+                    Some((piece, attrs))
+                })
+                .collect();
+            self.tab_buffer.set_rich_text(spans, &base, Shaping::Advanced, None);
+            self.tab_buffer.shape_until_scroll(&mut self.font_system, false);
+            self.last_tab_text = tab_text;
+        }
+
+        // Per-pane row buffers: reshape only rows whose content changed
+        // (text, spans, selection range, or background). Caches are keyed
+        // by pane id and pruned when panes close.
+        self.pane_buffers.retain(|id, _| panes.iter().any(|p| p.id == *id));
+        self.pane_rows.retain(|id, _| panes.iter().any(|p| p.id == *id));
+        let defaults = Attrs::new().family(Family::Monospace).color(self.fg);
+        let m = Metrics::new(self.font_size, self.font_size * 1.35);
+        for pane in panes {
+            let bufs = self.pane_buffers.entry(pane.id).or_default();
+            while bufs.len() < pane.rows.len() {
+                let mut buf = Buffer::new(&mut self.font_system, m);
+                buf.set_size(Some(4000.0), Some(m.line_height));
+                bufs.push(buf);
+            }
+            bufs.truncate(pane.rows.len());
+            let cached = self.pane_rows.entry(pane.id).or_default();
+            if cached.len() != pane.rows.len() {
+                *cached = vec![RowContent::empty(); pane.rows.len()];
+            }
+            for (i, row) in pane.rows.iter().enumerate() {
+                if cached[i] == *row {
+                    continue;
+                }
+                let attrs = Self::row_attrs(&defaults, row);
+                let buf = &mut bufs[i];
+                if buf.lines.is_empty() {
+                    buf.lines.push(BufferLine::new(
+                        row.text.clone(),
+                        LineEnding::None,
+                        attrs,
+                        Shaping::Advanced,
+                    ));
+                } else {
+                    buf.lines[0].set_text(row.text.clone(), LineEnding::None, attrs);
+                    buf.lines.truncate(1);
+                }
+                buf.shape_until_scroll(&mut self.font_system, false);
+                cached[i] = row.clone();
+            }
+        }
+
+        // Measure the real monospace advance from shaped glyphs (drives
+        // mouse->cell mapping). Falls back to the heuristic until a row
+        // with at least two glyphs has been shaped.
+        if self.measured_advance.is_none() {
+            'outer: for bufs in self.pane_buffers.values() {
+                for buf in bufs {
+                    for run in buf.layout_runs() {
+                        if run.glyphs.len() >= 2 {
+                            let first = run.glyphs[0].x;
+                            let last = run.glyphs[run.glyphs.len() - 1].x;
+                            let adv = (last - first) / (run.glyphs.len() - 1) as f32;
+                            if adv > 0.0 {
+                                self.measured_advance = Some(adv);
+                                break 'outer;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let tab_top = 6.0 * scale;
+        let tab_left = 8.0 * scale;
+        let (cell_w, line_h, body_left, body_top) = self.body_geometry(scale, strip);
+
+        // Background rects in physical pixels, drawn under the text in order:
+        // tab strip first (skipped when hidden), then per-cell backgrounds,
+        // selection, scrollbar.
+        let mut bg_verts: Vec<SelVertex> = Vec::new();
+        // Seamless Ghostty-style strip: full-width background in the body
+        // color (or the explicit override). No pill, no separator — the
+        // active tab reads through bold accent text alone.
+        if strip {
+            push_quad(
+                &mut bg_verts,
+                0.0,
+                0.0,
+                w as f32,
+                body_top,
+                w as f32,
+                h as f32,
+                self.strip_bg,
+            );
+        }
+        // Divider quads (1 cell, thumb color) between split panes.
+        for d in dividers {
+            let x0 = body_left + d.col as f32 * cell_w;
+            let y0 = body_top + d.row as f32 * line_h;
+            push_quad(
+                &mut bg_verts,
+                x0,
+                y0,
+                x0 + d.cols.max(1) as f32 * cell_w,
+                y0 + d.rows.max(1) as f32 * line_h,
+                w as f32,
+                h as f32,
+                self.thumb_bg,
+            );
+        }
+        for pane in panes {
+            let ox = body_left + pane.rect.col as f32 * cell_w;
+            let oy = body_top + pane.rect.row as f32 * line_h;
+            for (i, row) in pane.rows.iter().enumerate() {
+                let Some((lo, hi)) = row.sel_cols else {
+                    continue;
+                };
+                let x0 = ox + lo as f32 * cell_w;
+                let x1 = ox + (hi + 1) as f32 * cell_w;
+                let y0 = oy + i as f32 * line_h;
+                let y1 = y0 + line_h;
+                push_quad(&mut bg_verts, x0, y0, x1, y1, w as f32, h as f32, self.sel_bg);
+            }
+        }
+        // Scrollbar: hidden without history. Thumb at bottom = live view.
+        // The track lives inside the active pane (never over a neighbor).
+        let bar_w = mouse::BAR_W * scale;
+        let (track_top, track_h, track_x) = match scroll.pane {
+            Some(r) => (
+                body_top + r.row as f32 * line_h,
+                (r.rows as f32 * line_h - 4.0 * scale).max(0.0),
+                body_left + (r.col + r.cols) as f32 * cell_w - bar_w - mouse::BAR_MARGIN * scale,
+            ),
+            None => (
+                body_top,
+                (h as f32 - body_top - 4.0 * scale).max(0.0),
+                w as f32 - bar_w - mouse::BAR_MARGIN * scale,
+            ),
+        };
+        let sbar = mouse::scrollbar(track_top, track_h, scale, scroll.history, scroll.offset, scroll.rows);
+        if let Some((thumb_y, thumb_h)) = sbar.thumb {
+            push_quad(
+                &mut bg_verts,
+                track_x,
+                track_top,
+                track_x + bar_w,
+                track_top + track_h,
+                w as f32,
+                h as f32,
+                self.track_bg,
+            );
+            push_quad(
+                &mut bg_verts,
+                track_x,
+                thumb_y,
+                track_x + bar_w,
+                thumb_y + thumb_h,
+                w as f32,
+                h as f32,
+                self.thumb_bg,
+            );
+        }
+        // Upload capped at the preallocated vertex buffer.
+        bg_verts.truncate(MAX_BG_RECTS * SEL_VERTS_PER_RECT);
+        let bg_count = bg_verts.len() as u32;
+        if bg_count > 0 {
+            self.queue.write_buffer(
+                &self.bg_buffer,
+                0,
+                bytemuck::cast_slice(&bg_verts),
+            );
+        }
+
+        // One text area per pane row, clipped to the pane rect so wide
+        // glyphs never bleed across dividers.
+        let mut total_rows = 0;
+        for pane in panes {
+            total_rows += pane.rows.len();
+        }
+        let mut areas = Vec::with_capacity(total_rows + 1);
+        if strip {
+            areas.push(TextArea {
+                buffer: &self.tab_buffer,
+                left: tab_left,
+                top: tab_top,
+                scale,
+                bounds: TextBounds {
+                    left: 0,
+                    top: 0,
+                    right: w as i32,
+                    bottom: (body_top as i32).max(10),
+                },
+                default_color: self.tab_inactive_fg,
+                custom_glyphs: &[],
+            });
+        }
+        for pane in panes {
+            let bufs = self.pane_buffers.get(&pane.id);
+            let Some(bufs) = bufs else {
+                continue;
+            };
+            let px0 = body_left + pane.rect.col as f32 * cell_w;
+            let py0 = body_top + pane.rect.row as f32 * line_h;
+            let px1 = px0 + pane.rect.cols as f32 * cell_w;
+            let py1 = py0 + pane.rect.rows as f32 * line_h;
+            for (i, buf) in bufs.iter().enumerate() {
+                let top = py0 + i as f32 * line_h;
+                areas.push(TextArea {
+                    buffer: buf,
+                    left: px0,
+                    top,
+                    scale,
+                    bounds: TextBounds {
+                        left: px0 as i32,
+                        top: py0 as i32,
+                        right: px1 as i32,
+                        bottom: py1 as i32,
+                    },
+                    default_color: self.fg,
+                    custom_glyphs: &[],
+                });
+            }
+        }
+
+        if self
+            .text_renderer
+            .prepare(
+                &self.device,
+                &self.queue,
+                &mut self.font_system,
+                &mut self.atlas,
+                &self.viewport,
+                areas,
+                &mut self.swash_cache,
+            )
+            .is_err()
+        {
+            return;
+        }
+
+        let frame = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(f) => f,
+            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+                self.window.request_redraw();
+                return;
+            }
+            wgpu::CurrentSurfaceTexture::Outdated
+            | wgpu::CurrentSurfaceTexture::Suboptimal(_) => {
+                self.surface.configure(&self.device, &self.surface_config);
+                self.window.request_redraw();
+                return;
+            }
+            wgpu::CurrentSurfaceTexture::Lost => {
+                let surf = self.instance.create_surface(self.window.clone()).unwrap();
+                self.surface = surf;
+                self.surface.configure(&self.device, &self.surface_config);
+                self.window.request_redraw();
+                return;
+            }
+            wgpu::CurrentSurfaceTexture::Validation => return,
+        };
+        let view = frame.texture.create_view(&TextureViewDescriptor::default());
+        let mut encoder =
+            self.device
+                .create_command_encoder(&CommandEncoderDescriptor { label: None });
+        {
+            // Pass 1: clear + backgrounds (cell bg, selection, scrollbar).
+            let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
+                label: Some("neoterm-bg"),
+                color_attachments: &[Some(RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: Operations {
+                        load: LoadOp::Clear(self.bg),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            if bg_count > 0 {
+                pass.set_pipeline(&self.bg_pipeline);
+                pass.set_vertex_buffer(0, self.bg_buffer.slice(..));
+                pass.draw(0..bg_count, 0..1);
+            }
+        }
+        {
+            // Pass 2: text over the backgrounds.
+            let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
+                label: Some("neoterm-text"),
+                color_attachments: &[Some(RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: Operations {
+                        load: LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            let _ = self.text_renderer.render(&self.atlas, &self.viewport, &mut pass);
+        }
+        self.queue.submit(Some(encoder.finish()));
+        self.queue.present(frame);
+        self.atlas.trim();
+    }
+
+}
+
+/// Fixed UI colors before themes landed: `#rrggbb` -> 0..1 RGB.
+fn hex_quad(hex: &str) -> [f32; 3] {
+    let s = hex.trim_start_matches('#');
+    let ch = |i: usize| {
+        u8::from_str_radix(s.get(i..i + 2).unwrap_or("00"), 16).unwrap_or(0) as f32 / 255.0
+    };
+    [ch(0), ch(2), ch(4)]
+}
+
+/// Append a solid-color quad (two triangles) in NDC coordinates.
+/// Physical pixels in, y-down; NDC y-up out. Degenerate rects are skipped.
+fn push_quad(
+    out: &mut Vec<SelVertex>,
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    w: f32,
+    h: f32,
+    col: [f32; 3],
+) {
+    if w <= 0.0 || h <= 0.0 || x1 <= x0 || y1 <= y0 {
+        return;
+    }
+    let nx = |x: f32| x / w * 2.0 - 1.0;
+    let ny = |y: f32| 1.0 - y / h * 2.0;
+    let (ax, ay) = (nx(x0), ny(y0));
+    let (bx, by) = (nx(x1), ny(y1));
+    // Triangle 1: TL, TR, BR. Triangle 2: TL, BR, BL.
+    for (px, py) in [
+        (ax, ay),
+        (bx, ay),
+        (bx, by),
+        (ax, ay),
+        (bx, by),
+        (ax, by),
+    ] {
+        out.push(SelVertex {
+            pos: [px, py],
+            col,
+        });
+    }
+}
