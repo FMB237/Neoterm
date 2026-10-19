@@ -15,7 +15,7 @@ use anyhow::Result;
 use arboard::{Clipboard, GetExtLinux, LinuxClipboardKind, SetExtLinux};
 use clap::Parser;
 use winit::application::ApplicationHandler;
-use winit::dpi::{LogicalSize, PhysicalPosition};
+use winit::dpi::PhysicalPosition;
 use winit::event::{ElementState, Modifiers, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::window::{CursorIcon, Window, WindowId};
@@ -39,6 +39,9 @@ struct App {
     renderer: Option<Renderer>,
     tabs: Option<Tabs>,
     cfg: NeotermConfig,
+    /// Session-only font zoom override; `None` follows `cfg.font_size`.
+    /// Config reloads keep an active zoom instead of snapping back.
+    font_override: Option<f32>,
     mods: Modifiers,
     config_rx: Option<std::sync::mpsc::Receiver<()>>,
     _watcher: Option<notify::RecommendedWatcher>,
@@ -102,6 +105,7 @@ impl App {
             renderer: None,
             tabs: None,
             cfg,
+            font_override: None,
             mods: Modifiers::default(),
             config_rx: None,
             _watcher: None,
@@ -262,21 +266,19 @@ impl App {
                 Err(_) => return,
             };
         use notify::Watcher;
-        if watcher
-            .watch(&path, notify::RecursiveMode::NonRecursive)
-            .is_ok()
-        {
+        // Watch the parent directory, not the file: editors and `sed -i`
+        // replace the inode on save, which silently detaches a file watch
+        // after the first reload.
+        let watched = path
+            .parent()
+            .map(|dir| watcher.watch(dir, notify::RecursiveMode::NonRecursive).is_ok())
+            .unwrap_or(false)
+            || watcher
+                .watch(&path, notify::RecursiveMode::NonRecursive)
+                .is_ok();
+        if watched {
             self.config_rx = Some(rx);
             self._watcher = Some(watcher);
-        } else if let Some(parent) = path.parent() {
-            // Watch parent dir if file doesn't exist yet.
-            if watcher
-                .watch(parent, notify::RecursiveMode::NonRecursive)
-                .is_ok()
-            {
-                self.config_rx = Some(rx);
-                self._watcher = Some(watcher);
-            }
         }
     }
 
@@ -293,27 +295,78 @@ impl App {
             self.cfg = new_cfg;
             if let Some(r) = self.renderer.as_mut() {
                 r.apply_config(&self.cfg);
+                // Keep a live zoom across reloads; only 0 / restart resets it.
+                if let Some(size) = self.font_override {
+                    r.set_font_size(size);
+                }
             }
             if let Some(t) = self.tabs.as_mut() {
                 t.apply_config(&self.cfg);
             }
-            // Config affects colors/metrics: force next redraw to present.
-            self.force_draw = true;
-            if let Some(w) = self.window.as_ref() {
-                w.request_redraw();
-            }
+            // Config affects colors/metrics: reflow (font size may have
+            // changed) and force the next redraw to present.
+            self.reflow_grid();
         }
     }
 
-    /// Rough cols/rows estimate from pixels (v0.2 heuristic).
+    /// Cols/rows fitting the window. Delegates to the renderer so the grid
+    /// uses the same advance/padding as drawing and hit-testing (font zoom
+    /// and custom families included). Heuristic only before the renderer
+    /// exists.
     fn estimate_grid(&self, width_px: u32, height_px: u32) -> (u16, u16) {
         let scale = self.window.as_ref().map(|w| w.scale_factor()).unwrap_or(1.0) as f32;
+        if let Some(r) = self.renderer.as_ref() {
+            return r.grid_size(width_px, height_px, scale, self.strip_on());
+        }
         let cell_w = self.cfg.font_size * 0.62 * scale;
         let cell_h = self.cfg.font_size * 1.35 * scale;
-        let top = if self.strip_on() { 30.0 } else { 8.0 };
-        let cols = ((width_px as f32 - 16.0 * scale) / cell_w.max(1.0)) as u16;
+        let top = if self.strip_on() { 32.0 } else { 10.0 };
+        let cols = ((width_px as f32 - 24.0 * scale) / cell_w.max(1.0)) as u16;
         let rows = ((height_px as f32 - (top + 10.0) * scale) / cell_h.max(1.0)) as u16;
         (cols.clamp(20, 400), rows.clamp(5, 200))
+    }
+
+    /// Re-flow every pane after a metrics change (font zoom, config reload).
+    /// `resize_body` only resizes panes whose grid changed, so this never
+    /// SIGWINCH-storms unchanged panes.
+    fn reflow_grid(&mut self) {
+        let grid = self.window.as_ref().map(|w| {
+            let s = w.inner_size();
+            self.estimate_grid(s.width, s.height)
+        });
+        if let (Some((cols, rows)), Some(tabs)) = (grid, self.tabs.as_mut()) {
+            tabs.resize_all(cols, rows);
+        }
+        self.force_draw = true;
+        self.request_redraw();
+    }
+
+    /// Apply a session font size to the renderer and reflow the grid.
+    fn apply_font_size(&mut self, size: f32) {
+        if let Some(r) = self.renderer.as_mut() {
+            r.set_font_size(size);
+        }
+        self.reflow_grid();
+    }
+
+    fn current_font_size(&self) -> f32 {
+        self.renderer
+            .as_ref()
+            .map(|r| r.font_size())
+            .unwrap_or(self.cfg.font_size)
+    }
+
+    /// Ctrl+Shift+Plus/Minus: step the font size, session-only.
+    fn zoom_font(&mut self, delta: f32) {
+        let size = (self.current_font_size() + delta).clamp(6.0, 48.0);
+        self.font_override = Some(size);
+        self.apply_font_size(size);
+    }
+
+    /// Ctrl+Shift+0: back to the configured font size.
+    fn reset_font(&mut self) {
+        self.font_override = None;
+        self.apply_font_size(self.cfg.font_size);
     }
 
     fn request_redraw(&self) {
@@ -439,7 +492,7 @@ impl App {
             }
             let titles = tabs.titles();
             let adv = g.0 / scale.max(f32::EPSILON);
-            let regions = mouse::tab_regions(&titles, tabs.active_index(), adv, 8.0 * scale, scale);
+            let regions = mouse::tab_regions(&titles, tabs.active_index(), adv, renderer::TAB_LEFT * scale, scale);
             mouse::tab_hit(&regions, pos.x as f32)
         })();
         if self.strip_on() {
@@ -455,7 +508,7 @@ impl App {
                 }
                 let titles = tabs.titles();
                 let adv = g.0 / scale.max(f32::EPSILON);
-                mouse::tab_new_hit(&titles, tabs.active_index(), adv, 8.0 * scale, scale, pos.x as f32)
+                mouse::tab_new_hit(&titles, tabs.active_index(), adv, renderer::TAB_LEFT * scale, scale, pos.x as f32)
                     .then_some(())
             })();
             if new_tab.is_some() {
@@ -481,7 +534,7 @@ impl App {
                     &titles,
                     tabs.active_index(),
                     adv,
-                    8.0 * scale,
+                    renderer::TAB_LEFT * scale,
                     scale,
                     pos.x as f32,
                 )
@@ -701,7 +754,7 @@ impl App {
             let titles = tabs.titles();
             let adv = g.0 / scale.max(f32::EPSILON);
             let regions =
-                mouse::tab_regions(&titles, tabs.active_index(), adv, 8.0 * scale, scale);
+                mouse::tab_regions(&titles, tabs.active_index(), adv, renderer::TAB_LEFT * scale, scale);
             mouse::tab_hit(&regions, pos.x as f32)
         })();
         if let Some(i) = tab_click {
@@ -984,7 +1037,7 @@ impl ApplicationHandler for App {
         }
         let attrs = Window::default_attributes()
             .with_title("NeoTerm 0.2")
-            .with_inner_size(LogicalSize::new(960.0, 600.0));
+            .with_inner_size(Renderer::window_logical_size());
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
 
         let renderer = pollster::block_on(Renderer::new(window.clone(), event_loop, &self.cfg));
@@ -1004,7 +1057,10 @@ impl ApplicationHandler for App {
                 t.resize_all(cols, rows);
             }
         }
-        log::info!("NeoTerm v0.2 ready: Ctrl+Shift+T new tab, Ctrl+Shift+W close, Ctrl+Tab switch");
+        log::info!(
+            "NeoTerm v0.2 ready: Ctrl+Shift+T new tab, Ctrl+Shift+W close, \
+             Ctrl+Tab switch, Ctrl+Shift+± font size"
+        );
     }
 
     fn window_event(
@@ -1093,6 +1149,9 @@ impl ApplicationHandler for App {
                         self.force_draw = true;
                         self.request_redraw();
                     }
+                    InputAction::FontZoomIn => self.zoom_font(1.0),
+                    InputAction::FontZoomOut => self.zoom_font(-1.0),
+                    InputAction::FontZoomReset => self.reset_font(),
                     InputAction::NextTab => {
                         if let Some(tabs) = self.tabs.as_mut() {
                             tabs.next();

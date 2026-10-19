@@ -13,7 +13,7 @@ use wgpu::{
     RenderPassColorAttachment, RenderPassDescriptor, RequestAdapterOptions, Surface,
     SurfaceConfiguration, TextureFormat, TextureUsages, TextureViewDescriptor,
 };
-use winit::window::Window;
+use winit::{dpi::LogicalSize, window::Window};
 
 use crate::config::NeotermConfig;
 use crate::mouse;
@@ -46,24 +46,38 @@ pub struct ScrollState {
 /// overflow is truncated (documented, never crashes).
 const MAX_BG_RECTS: usize = 2048;
 const SEL_VERTS_PER_RECT: usize = 6;
-const SEL_FLOATS_PER_VERT: usize = 5;
+const SEL_FLOATS_PER_VERT: usize = 6;
 
-/// One colored 2D vertex for the selection-background pass.
+/// Body padding in logical pixels at scale 1. Symmetric so the grid sits
+/// in an even frame instead of hugging the window edges.
+pub const PAD_X: f32 = 12.0;
+pub const PAD_TOP: f32 = 10.0;
+pub const PAD_BOTTOM: f32 = 10.0;
+/// Tab strip: left inset and minimum height (logical px at scale 1).
+/// The strip grows with the font so large zoom levels never clip labels.
+pub const TAB_LEFT: f32 = 12.0;
+pub const STRIP_MIN_H: f32 = 32.0;
+/// Terminal line height as a multiple of the font size.
+pub const LINE_HEIGHT: f32 = 1.35;
+
+/// One colored 2D vertex for the selection-background pass. Alpha lets
+/// chrome (selection, dividers, scrollbar) blend softly into the body
+/// instead of stamping hard color blocks.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 struct SelVertex {
     pos: [f32; 2],
-    col: [f32; 3],
+    col: [f32; 4],
 }
 
 const SEL_SHADER: &str = r#"
 struct Vin {
     @location(0) pos: vec2<f32>,
-    @location(1) col: vec3<f32>,
+    @location(1) col: vec4<f32>,
 };
 struct Vout {
     @builtin(position) pos: vec4<f32>,
-    @location(0) col: vec3<f32>,
+    @location(0) col: vec4<f32>,
 };
 @vertex
 fn vs(v: Vin) -> Vout {
@@ -73,8 +87,8 @@ fn vs(v: Vin) -> Vout {
     return o;
 }
 @fragment
-fn fs(@location(0) col: vec3<f32>) -> @location(0) vec4<f32> {
-    return vec4<f32>(col, 1.0);
+fn fs(@location(0) col: vec4<f32>) -> @location(0) vec4<f32> {
+    return col;
 }
 "#;
 
@@ -98,11 +112,15 @@ pub struct Renderer {
     bg: wgpu::Color,
     fg: Color,
     font_size: f32,
-    /// Theme quad colors (0..1 RGB): selection, scrollbar, tab strip.
+    /// Resolved font family; `None` = cosmic-text's generic `Monospace`.
+    font_family: Option<String>,
+    /// Theme quad colors (0..1 RGB): selection, scrollbar, tab strip,
+    /// active-tab accent.
     sel_bg: [f32; 3],
     track_bg: [f32; 3],
     thumb_bg: [f32; 3],
     strip_bg: [f32; 3],
+    tab_accent: [f32; 3],
     /// Tab-strip text colors: active / inactive / close mark.
     tab_active_fg: Color,
     tab_inactive_fg: Color,
@@ -162,6 +180,7 @@ impl Renderer {
         let text_renderer =
             TextRenderer::new(&mut atlas, &device, MultisampleState::default(), None);
 
+        let font_family = resolve_family(&mut font_system, &cfg.font_family);
         let font_size = cfg.font_size;
         let mut tab_buffer = Buffer::new(&mut font_system, Metrics::new(font_size, font_size * 1.3));
         tab_buffer.set_size(Some(2000.0), Some(40.0));
@@ -185,7 +204,7 @@ impl Renderer {
                 buffers: &[Some(wgpu::VertexBufferLayout {
                     array_stride: (SEL_FLOATS_PER_VERT * 4) as u64,
                     step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x3],
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x4],
                 })],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
@@ -197,7 +216,7 @@ impl Renderer {
                 entry_point: Some("fs"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: swapchain_format,
-                    blend: None,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
@@ -212,7 +231,7 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
-        let renderer = Self {
+        let mut renderer = Self {
             device,
             queue,
             surface,
@@ -230,10 +249,12 @@ impl Renderer {
             bg: cfg.bg_wgpu(),
             fg: cfg.fg_glyphon(),
             font_size,
+            font_family,
             sel_bg: cfg.theme.selection_quad(),
             track_bg: cfg.theme.scrollbar_track_quad(),
             thumb_bg: cfg.theme.scrollbar_thumb_quad(),
             strip_bg: cfg.theme.tab_bar_bg_quad(),
+            tab_accent: cfg.theme.tab_accent_quad(),
             tab_active_fg: cfg.theme.tab_active_fg_glyphon(),
             tab_inactive_fg: cfg.theme.tab_inactive_fg_glyphon(),
             tab_close_fg: cfg.theme.tab_close_fg_glyphon(),
@@ -242,6 +263,9 @@ impl Renderer {
             bg_pipeline,
             bg_buffer,
         };
+        // Measure the real advance up front so the first grid estimate
+        // already matches the font (and any configured family).
+        renderer.measured_advance = renderer.probe_advance();
         renderer
     }
 
@@ -265,15 +289,21 @@ impl Renderer {
         self.track_bg = cfg.theme.scrollbar_track_quad();
         self.thumb_bg = cfg.theme.scrollbar_thumb_quad();
         self.strip_bg = cfg.theme.tab_bar_bg_quad();
+        self.tab_accent = cfg.theme.tab_accent_quad();
         self.tab_active_fg = cfg.theme.tab_active_fg_glyphon();
         self.tab_inactive_fg = cfg.theme.tab_inactive_fg_glyphon();
         self.tab_close_fg = cfg.theme.tab_close_fg_glyphon();
+        // Family is resolved against the installed fonts; a missing family
+        // falls back to generic monospace instead of a proportional face.
+        let family = resolve_family(&mut self.font_system, &cfg.font_family);
+        let family_changed = family != self.font_family;
+        self.font_family = family;
         // Any config change forces re-shape (colors/font may differ).
         self.last_tab_text.clear();
         self.pane_rows.clear();
-        if (cfg.font_size - self.font_size).abs() > f32::EPSILON {
+        if family_changed || (cfg.font_size - self.font_size).abs() > f32::EPSILON {
             self.font_size = cfg.font_size;
-            let m = Metrics::new(self.font_size, self.font_size * 1.35);
+            let m = Metrics::new(self.font_size, self.font_size * LINE_HEIGHT);
             for bufs in self.pane_buffers.values_mut() {
                 for buf in bufs {
                     buf.set_metrics(m);
@@ -281,13 +311,72 @@ impl Renderer {
             }
             let m2 = Metrics::new(self.font_size, self.font_size * 1.3);
             self.tab_buffer.set_metrics(m2);
-            self.measured_advance = None;
+            self.measured_advance = self.probe_advance();
         }
+    }
+
+    /// Runtime font zoom (session-only): retargets every text buffer and
+    /// re-measures the advance so grid/hit-testing follow the new face.
+    pub fn set_font_size(&mut self, size: f32) {
+        let size = size.clamp(6.0, 48.0);
+        if (size - self.font_size).abs() < 0.01 {
+            return;
+        }
+        self.font_size = size;
+        let m = Metrics::new(size, size * LINE_HEIGHT);
+        for bufs in self.pane_buffers.values_mut() {
+            for buf in bufs {
+                buf.set_metrics(m);
+            }
+        }
+        self.tab_buffer.set_metrics(Metrics::new(size, size * 1.3));
+        self.last_tab_text.clear();
+        self.pane_rows.clear();
+        self.measured_advance = self.probe_advance();
+        log::info!("font size: {size:.1}pt");
+        self.window.request_redraw();
+    }
+
+    pub fn font_size(&self) -> f32 {
+        self.font_size
+    }
+
+    /// Shape a throwaway run to get the real advance for the current face.
+    /// Falls back to `None` (0.62em heuristic) only if shaping yields one
+    /// glyph or less.
+    fn probe_advance(&mut self) -> Option<f32> {
+        let family = match self.font_family.as_deref() {
+            Some(name) => Family::Name(name),
+            None => Family::Monospace,
+        };
+        let metrics = Metrics::new(self.font_size, self.font_size * LINE_HEIGHT);
+        let mut buf = Buffer::new(&mut self.font_system, metrics);
+        buf.set_size(Some(4000.0), Some(metrics.line_height));
+        let attrs = Attrs::new().family(family).color(Color::rgb(255, 255, 255));
+        buf.set_text("MMMMMMMMMMMMMMMMMMMM", &attrs, Shaping::Advanced, None);
+        buf.shape_until_scroll(&mut self.font_system, false);
+        for run in buf.layout_runs() {
+            if run.glyphs.len() >= 2 {
+                let first = run.glyphs[0].x;
+                let last = run.glyphs[run.glyphs.len() - 1].x;
+                let adv = (last - first) / (run.glyphs.len() - 1) as f32;
+                if adv > 0.0 {
+                    return Some(adv);
+                }
+            }
+        }
+        None
     }
 
     /// Line height in physical pixels at the current scale.
     fn line_height(&self, scale: f32) -> f32 {
-        self.font_size * 1.35 * scale
+        self.font_size * LINE_HEIGHT * scale
+    }
+
+    /// Height of the tab strip in layout units: grows with the font so
+    /// labels and the active-tab accent never clip at large zoom levels.
+    fn strip_height(&self) -> f32 {
+        (self.font_size * 1.3 + 16.0).max(STRIP_MIN_H)
     }
 
     /// Monospace advance in layout units: measured from shaped glyphs when
@@ -304,20 +393,41 @@ impl Renderer {
         (
             self.advance() * scale,
             self.line_height(scale),
-            8.0 * scale,
-            if strip { 30.0 * scale } else { 8.0 * scale },
+            PAD_X * scale,
+            if strip {
+                self.strip_height() * scale
+            } else {
+                PAD_TOP * scale
+            },
+        )
+    }
+
+    /// Grid cells fitting in a window, using the same geometry as drawing
+    /// and hit-testing. This is the single source of truth for reflows
+    /// (window resize, font zoom, strip show/hide).
+    pub fn grid_size(
+        &self,
+        width_px: u32,
+        height_px: u32,
+        scale: f32,
+        strip: bool,
+    ) -> (u16, u16) {
+        let (cell_w, line_h, left, top) = self.body_geometry(scale, strip);
+        let cols = ((width_px as f32 - 2.0 * left) / cell_w.max(1.0)).floor();
+        let rows = ((height_px as f32 - top - PAD_BOTTOM * scale) / line_h.max(1.0)).floor();
+        (
+            (cols.max(20.0) as u16).min(400),
+            (rows.max(5.0) as u16).min(200),
         )
     }
 
     /// Build a cosmic-text attrs list for one row: default fg + per-span
-    /// overrides (color, bold, italic).
-    fn row_attrs(defaults: &Attrs, row: &RowContent) -> AttrsList {
+    /// overrides (color, bold, italic) in the configured family.
+    fn row_attrs(defaults: &Attrs, family: Family<'_>, row: &RowContent) -> AttrsList {
         let mut list = AttrsList::new(defaults);
         for (range, style) in &row.spans {
             let (r, g, b) = style.fg;
-            let mut attrs = Attrs::new()
-                .family(Family::Monospace)
-                .color(Color::rgb(r, g, b));
+            let mut attrs = Attrs::new().family(family).color(Color::rgb(r, g, b));
             if style.bold {
                 attrs = attrs.weight(Weight::BOLD);
             }
@@ -353,22 +463,22 @@ impl Renderer {
         // Tab bar text (single source of truth shared with hit-testing),
         // styled in pieces: active segment bold + accent, close marks and
         // the `+` mark muted, everything else dimmed inactive.
+        let family = match self.font_family.as_deref() {
+            Some(name) => Family::Name(name),
+            None => Family::Monospace,
+        };
         let mut tab_text = mouse::tab_bar_text(titles, active);
         if tab_text.is_empty() {
             tab_text = " NeoTerm ".to_string();
         }
         if tab_text != self.last_tab_text {
             let (active_range, x_ranges, plus_range) = mouse::tab_span_ranges(titles, active);
-            let base = Attrs::new()
-                .family(Family::Monospace)
-                .color(self.tab_inactive_fg);
+            let base = Attrs::new().family(family).color(self.tab_inactive_fg);
             let active_attrs = Attrs::new()
-                .family(Family::Monospace)
+                .family(family)
                 .color(self.tab_active_fg)
                 .weight(Weight::BOLD);
-            let close_attrs = Attrs::new()
-                .family(Family::Monospace)
-                .color(self.tab_close_fg);
+            let close_attrs = Attrs::new().family(family).color(self.tab_close_fg);
             // Partition the text at every span edge; each piece takes the
             // innermost style (close mark wins inside the active segment).
             let mut cuts = vec![
@@ -420,8 +530,8 @@ impl Renderer {
         // by pane id and pruned when panes close.
         self.pane_buffers.retain(|id, _| panes.iter().any(|p| p.id == *id));
         self.pane_rows.retain(|id, _| panes.iter().any(|p| p.id == *id));
-        let defaults = Attrs::new().family(Family::Monospace).color(self.fg);
-        let m = Metrics::new(self.font_size, self.font_size * 1.35);
+        let defaults = Attrs::new().family(family).color(self.fg);
+        let m = Metrics::new(self.font_size, self.font_size * LINE_HEIGHT);
         for pane in panes {
             let bufs = self.pane_buffers.entry(pane.id).or_default();
             while bufs.len() < pane.rows.len() {
@@ -438,7 +548,7 @@ impl Renderer {
                 if cached[i] == *row {
                     continue;
                 }
-                let attrs = Self::row_attrs(&defaults, row);
+                let attrs = Self::row_attrs(&defaults, family, row);
                 let buf = &mut bufs[i];
                 if buf.lines.is_empty() {
                     buf.lines.push(BufferLine::new(
@@ -477,9 +587,10 @@ impl Renderer {
             }
         }
 
-        let tab_top = 6.0 * scale;
-        let tab_left = 8.0 * scale;
         let (cell_w, line_h, body_left, body_top) = self.body_geometry(scale, strip);
+        // Center the strip label in its band; grows with the font.
+        let tab_top = ((body_top - self.font_size * 1.3 * scale) / 2.0).max(2.0);
+        let tab_left = TAB_LEFT * scale;
 
         // Background rects in physical pixels, drawn under the text in order:
         // tab strip first (skipped when hidden), then per-cell backgrounds,
@@ -487,7 +598,7 @@ impl Renderer {
         let mut bg_verts: Vec<SelVertex> = Vec::new();
         // Seamless Ghostty-style strip: full-width background in the body
         // color (or the explicit override). No pill, no separator — the
-        // active tab reads through bold accent text alone.
+        // active tab reads through bold accent text and a short underline.
         if strip {
             push_quad(
                 &mut bg_verts,
@@ -497,22 +608,53 @@ impl Renderer {
                 body_top,
                 w as f32,
                 h as f32,
-                self.strip_bg,
+                with_alpha(self.strip_bg, 1.0),
             );
+            // Accent underline under the active tab (theme `tab_accent`).
+            if !titles.is_empty() && active < titles.len() {
+                let regions = mouse::tab_regions(titles, active, self.advance(), tab_left, scale);
+                if let Some(&(x0, x1)) = regions.get(active) {
+                    let inset = 6.0 * scale;
+                    push_quad(
+                        &mut bg_verts,
+                        x0 + inset,
+                        body_top - 3.0 * scale,
+                        (x1 - inset).max(x0 + inset),
+                        body_top - 1.0 * scale,
+                        w as f32,
+                        h as f32,
+                        with_alpha(self.tab_accent, 0.95),
+                    );
+                }
+            }
         }
-        // Divider quads (1 cell, thumb color) between split panes.
+        // Dividers own a full grid cell for layout/hit-testing, but are
+        // painted as a hairline centered in that cell: the gap reads as a
+        // seam, not a painted bar.
+        let seam = (1.0 * scale).max(1.0);
         for d in dividers {
             let x0 = body_left + d.col as f32 * cell_w;
             let y0 = body_top + d.row as f32 * line_h;
+            let cw = d.cols.max(1) as f32 * cell_w;
+            let ch = d.rows.max(1) as f32 * line_h;
+            let (sx0, sx1, sy0, sy1) = if d.cols <= d.rows {
+                // Vertical seam (1 column wide).
+                let x = x0 + (cw - seam) / 2.0;
+                (x, x + seam, y0, y0 + ch)
+            } else {
+                // Horizontal seam (1 row tall).
+                let y = y0 + (ch - seam) / 2.0;
+                (x0, x0 + cw, y, y + seam)
+            };
             push_quad(
                 &mut bg_verts,
-                x0,
-                y0,
-                x0 + d.cols.max(1) as f32 * cell_w,
-                y0 + d.rows.max(1) as f32 * line_h,
+                sx0,
+                sy0,
+                sx1,
+                sy1,
                 w as f32,
                 h as f32,
-                self.thumb_bg,
+                with_alpha(self.thumb_bg, 0.7),
             );
         }
         for pane in panes {
@@ -531,9 +673,10 @@ impl Renderer {
                         w as f32,
                         h as f32,
                         [
-                            *r as f32 / 255.0,
-                            *g as f32 / 255.0,
-                            *b as f32 / 255.0,
+                            crate::config::NeotermConfig::srgb8_to_linear(*r),
+                            crate::config::NeotermConfig::srgb8_to_linear(*g),
+                            crate::config::NeotermConfig::srgb8_to_linear(*b),
+                            1.0,
                         ],
                     );
                 }
@@ -550,7 +693,16 @@ impl Renderer {
                 let x1 = ox + (hi + 1) as f32 * cell_w;
                 let y0 = oy + i as f32 * line_h;
                 let y1 = y0 + line_h;
-                push_quad(&mut bg_verts, x0, y0, x1, y1, w as f32, h as f32, self.sel_bg);
+                push_quad(
+                    &mut bg_verts,
+                    x0,
+                    y0,
+                    x1,
+                    y1,
+                    w as f32,
+                    h as f32,
+                    with_alpha(self.sel_bg, 0.72),
+                );
             }
         }
         // Scrollbar: hidden without history. Thumb at bottom = live view.
@@ -578,7 +730,7 @@ impl Renderer {
                 track_top + track_h,
                 w as f32,
                 h as f32,
-                self.track_bg,
+                with_alpha(self.track_bg, 0.35),
             );
             push_quad(
                 &mut bg_verts,
@@ -588,7 +740,7 @@ impl Renderer {
                 thumb_y + thumb_h,
                 w as f32,
                 h as f32,
-                self.thumb_bg,
+                with_alpha(self.thumb_bg, 0.85),
             );
         }
         // Upload capped at the preallocated vertex buffer.
@@ -743,6 +895,50 @@ impl Renderer {
         self.atlas.trim();
     }
 
+    pub fn window_logical_size() -> LogicalSize<f64> {
+        LogicalSize::new(960.0, 600.0)
+    }
+}
+
+/// Resolve a comma-separated family preference list to the first installed
+/// family. `None` means the generic `Family::Monospace` (also the fallback
+/// when nothing in the list is installed, so a typo never silently turns
+/// the terminal proportional).
+fn resolve_family(font_system: &mut FontSystem, spec: &str) -> Option<String> {
+    let spec = spec.trim();
+    if spec.is_empty() || spec.eq_ignore_ascii_case("monospace") {
+        return None;
+    }
+    // Family name -> any installed face monospaced?
+    let mut installed: Vec<(String, bool)> = Vec::new();
+    for face in font_system.db_mut().faces() {
+        for (name, _) in &face.families {
+            installed.push((name.clone(), face.monospaced));
+        }
+    }
+    for name in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        if name.eq_ignore_ascii_case("monospace") {
+            return None;
+        }
+        let hit = installed
+            .iter()
+            .find(|(f, _)| f.eq_ignore_ascii_case(name))
+            .map(|(_, mono)| *mono);
+        if let Some(mono) = hit {
+            if !mono {
+                log::warn!("font family {name:?} is not monospaced; the cell grid may drift");
+            }
+            log::info!("font family: {name:?}");
+            return Some(name.to_string());
+        }
+    }
+    log::warn!("font_family {spec:?} not installed; using monospace");
+    None
+}
+
+/// RGBA quad color from a theme RGB triplet.
+fn with_alpha(col: [f32; 3], a: f32) -> [f32; 4] {
+    [col[0], col[1], col[2], a]
 }
 
 /// Append a solid-color quad (two triangles) in NDC coordinates.
@@ -755,7 +951,7 @@ fn push_quad(
     y1: f32,
     w: f32,
     h: f32,
-    col: [f32; 3],
+    col: [f32; 4],
 ) {
     if w <= 0.0 || h <= 0.0 || x1 <= x0 || y1 <= y0 {
         return;

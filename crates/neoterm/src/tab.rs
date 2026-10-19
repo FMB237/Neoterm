@@ -1626,8 +1626,7 @@ mod tests {
 
     /// Named colors resolve through the theme palette, not the xterm table.
     #[test]
-    fn theme_palette_overrides_named_colors() {
-        let size = TermSize { cols: 20, rows: 10 };
+    fn theme_palette_overrides_named_colors() {        let size = TermSize { cols: 20, rows: 10 };
         let mut term = Term::new(TermConfig::default(), &size, TitleListener::headless("tab-0").0);
         feed(&mut term, "\x1b[31mred\x1b[0m \x1b[38;5;1midx");
         let palette = Theme::default().palette_rgb();

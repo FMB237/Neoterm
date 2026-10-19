@@ -1,5 +1,5 @@
 use winit::event::{ElementState, KeyEvent, Modifiers};
-use winit::keyboard::{Key, NamedKey};
+use winit::keyboard::{Key, ModifiersState, NamedKey};
 
 /// Result of handling a key event.
 pub enum InputAction {
@@ -26,6 +26,10 @@ pub enum InputAction {
     FocusPane(FocusDir),
     /// Toggle fullscreen zoom of the active pane.
     ZoomPane,
+    /// Font-size zoom (session-only): Ctrl+Shift+Plus / Minus / 0.
+    FontZoomIn,
+    FontZoomOut,
+    FontZoomReset,
     Ignored,
 }
 
@@ -40,7 +44,8 @@ pub enum FocusDir {
 
 /// Map winit key events to terminal input or tab actions.
 ///
-/// Ctrl+Shift+T/W/N/P/C/V handled here; everything else becomes PTY bytes.
+/// Chrome shortcuts (tabs, splits, clipboard, font zoom, Alt+arrows) are
+/// matched by `chrome_action` first; everything else becomes PTY bytes.
 /// `alt_screen` routes PageUp/PageDown: apps on the alternate screen
 /// (vim, less) get the key, otherwise we scroll locally — unless Shift is
 /// held, which always scrolls locally.
@@ -49,56 +54,13 @@ pub fn map_key(event: &KeyEvent, mods: &Modifiers, alt_screen: bool) -> InputAct
         return InputAction::Ignored;
     }
 
+    // Window/app chrome shortcuts first (never reach the PTY).
+    if let Some(action) = chrome_action(&event.logical_key, mods.state()) {
+        return action;
+    }
+
     let ctrl = mods.state().control_key();
     let shift = mods.state().shift_key();
-
-    // Tab management + clipboard shortcuts.
-    // NOTE: Ctrl+Shift+C/V never reach the PTY (unlike Ctrl+C = SIGINT).
-    // This matches GNOME Terminal / Alacritty behavior.
-    if ctrl && shift {
-        match &event.logical_key {
-            Key::Character(s) => match s.to_uppercase().as_str() {
-                "T" => return InputAction::NewTab,
-                "W" => return InputAction::ClosePane,
-                "N" => return InputAction::NextTab,
-                "P" => return InputAction::PrevTab,
-                "C" => return InputAction::Copy,
-                "V" => return InputAction::Paste,
-                "E" => return InputAction::SplitV,
-                "O" => return InputAction::SplitH,
-                "Z" => return InputAction::ZoomPane,
-                _ => {}
-            },
-            Key::Named(NamedKey::Tab) => return InputAction::NextTab,
-            _ => {}
-        }
-    }
-    if ctrl && !shift {
-        match &event.logical_key {
-            Key::Named(NamedKey::Tab) => return InputAction::NextTab,
-            Key::Character(s) => {
-                // Alt-style: Ctrl+1..9 switches tabs.
-                if let Ok(n) = s.parse::<usize>() {
-                    if (1..=9).contains(&n) {
-                        return InputAction::SelectTab(n - 1);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    // Alt+arrows move pane focus (stolen from apps: multiplexers own it,
-    // same as tmux prefix+arrows). Plain/shifted arrows still reach the PTY.
-    if mods.state().alt_key() {
-        match &event.logical_key {
-            Key::Named(NamedKey::ArrowUp) => return InputAction::FocusPane(FocusDir::Up),
-            Key::Named(NamedKey::ArrowDown) => return InputAction::FocusPane(FocusDir::Down),
-            Key::Named(NamedKey::ArrowRight) => return InputAction::FocusPane(FocusDir::Right),
-            Key::Named(NamedKey::ArrowLeft) => return InputAction::FocusPane(FocusDir::Left),
-            _ => {}
-        }
-    }
 
     // Special keys.
     match &event.logical_key {
@@ -149,4 +111,118 @@ pub fn map_key(event: &KeyEvent, mods: &Modifiers, alt_screen: bool) -> InputAct
     }
 
     InputAction::Ignored
+}
+
+/// Chrome shortcuts: tabs, splits, clipboard, font zoom, focus movement.
+///
+/// NOTE: Ctrl+Shift+C/V never reach the PTY (unlike Ctrl+C = SIGINT).
+/// This matches GNOME Terminal / Alacritty behavior.
+fn chrome_action(key: &Key, mods: ModifiersState) -> Option<InputAction> {
+    let ctrl = mods.control_key();
+    let shift = mods.shift_key();
+
+    if ctrl && shift {
+        match key {
+            Key::Character(s) => match s.to_uppercase().as_str() {
+                "T" => return Some(InputAction::NewTab),
+                "W" => return Some(InputAction::ClosePane),
+                "N" => return Some(InputAction::NextTab),
+                "P" => return Some(InputAction::PrevTab),
+                "C" => return Some(InputAction::Copy),
+                "V" => return Some(InputAction::Paste),
+                "E" => return Some(InputAction::SplitV),
+                "O" => return Some(InputAction::SplitH),
+                "Z" => return Some(InputAction::ZoomPane),
+                // Layout-dependent symbols: accept both the shifted and
+                // unshifted forms (`+`/`=`, `-`/`_`, `0`/`)`).
+                "+" | "=" => return Some(InputAction::FontZoomIn),
+                "-" | "_" => return Some(InputAction::FontZoomOut),
+                "0" | ")" => return Some(InputAction::FontZoomReset),
+                _ => {}
+            },
+            Key::Named(NamedKey::Tab) => return Some(InputAction::NextTab),
+            _ => {}
+        }
+    }
+    if ctrl && !shift {
+        match key {
+            Key::Named(NamedKey::Tab) => return Some(InputAction::NextTab),
+            Key::Character(s) => {
+                // Alt-style: Ctrl+1..9 switches tabs.
+                if let Ok(n) = s.parse::<usize>() {
+                    if (1..=9).contains(&n) {
+                        return Some(InputAction::SelectTab(n - 1));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Alt+arrows move pane focus (stolen from apps: multiplexers own it,
+    // same as tmux prefix+arrows). Plain/shifted arrows still reach the PTY.
+    if mods.alt_key() {
+        match key {
+            Key::Named(NamedKey::ArrowUp) => return Some(InputAction::FocusPane(FocusDir::Up)),
+            Key::Named(NamedKey::ArrowDown) => return Some(InputAction::FocusPane(FocusDir::Down)),
+            Key::Named(NamedKey::ArrowRight) => {
+                return Some(InputAction::FocusPane(FocusDir::Right))
+            }
+            Key::Named(NamedKey::ArrowLeft) => {
+                return Some(InputAction::FocusPane(FocusDir::Left))
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn press(ch: &str, mods: ModifiersState) -> Option<InputAction> {
+        chrome_action(&Key::Character(ch.into()), mods)
+    }
+
+    fn ctrl_shift() -> ModifiersState {
+        ModifiersState::CONTROL | ModifiersState::SHIFT
+    }
+
+    #[test]
+    fn font_zoom_keys_match_shifted_and_unshifted_symbols() {
+        assert!(matches!(
+            press("+", ctrl_shift()),
+            Some(InputAction::FontZoomIn)
+        ));
+        assert!(matches!(
+            press("=", ctrl_shift()),
+            Some(InputAction::FontZoomIn)
+        ));
+        assert!(matches!(
+            press("-", ctrl_shift()),
+            Some(InputAction::FontZoomOut)
+        ));
+        assert!(matches!(
+            press("_", ctrl_shift()),
+            Some(InputAction::FontZoomOut)
+        ));
+        assert!(matches!(
+            press("0", ctrl_shift()),
+            Some(InputAction::FontZoomReset)
+        ));
+        // US layout reports Shift+0 as ")".
+        assert!(matches!(
+            press(")", ctrl_shift()),
+            Some(InputAction::FontZoomReset)
+        ));
+        // Existing shortcuts are untouched.
+        assert!(matches!(
+            press("T", ctrl_shift()),
+            Some(InputAction::NewTab)
+        ));
+        assert!(matches!(press("C", ctrl_shift()), Some(InputAction::Copy)));
+        // Plain symbols are not chrome.
+        assert!(press("+", ModifiersState::empty()).is_none());
+    }
 }

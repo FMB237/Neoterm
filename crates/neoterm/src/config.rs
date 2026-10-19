@@ -206,7 +206,11 @@ impl Theme {
 
     fn quad_f32(hex: &str) -> [f32; 3] {
         let (r, g, b) = Self::parse_hex_u8(hex);
-        [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0]
+        [
+            NeotermConfig::srgb8_to_linear(r),
+            NeotermConfig::srgb8_to_linear(g),
+            NeotermConfig::srgb8_to_linear(b),
+        ]
     }
 
     pub fn selection_quad(&self) -> [f32; 3] {
@@ -226,6 +230,11 @@ impl Theme {
 
     pub fn scrollbar_thumb_quad(&self) -> [f32; 3] {
         Self::quad_f32(&self.scrollbar_thumb)
+    }
+
+    /// Accent used for the active-tab underline (was reserved pre-v0.3).
+    pub fn tab_accent_quad(&self) -> [f32; 3] {
+        Self::quad_f32(&self.tab_accent)
     }
 
     pub fn tab_active_fg_glyphon(&self) -> glyphon::Color {
@@ -342,6 +351,19 @@ impl NeotermConfig {
         (r, g, b)
     }
 
+    /// sRGB 8-bit channel -> linear float. The swapchain is an `*Srgb`
+    /// target, so shader/clear colors must be linear; feeding raw bytes
+    /// washes the whole palette out (a #1a1b26 body would present as
+    /// slate gray).
+    pub fn srgb8_to_linear(v: u8) -> f32 {
+        let c = v as f32 / 255.0;
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    }
+
     /// Default foreground as 8-bit RGB (used when cells use `Named(Foreground)`).
     pub fn fg_rgb(&self) -> (u8, u8, u8) {
         Self::parse_hex_u8(&self.theme.foreground)
@@ -354,7 +376,20 @@ impl NeotermConfig {
 
     pub fn bg_wgpu(&self) -> wgpu::Color {
         let (r, g, b) = Self::parse_hex_color(&self.theme.background);
-        wgpu::Color { r, g, b, a: 1.0 }
+        let lin = |c: f64| {
+            let c = c as f32;
+            if c <= 0.04045 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        wgpu::Color {
+            r: lin(r) as f64,
+            g: lin(g) as f64,
+            b: lin(b) as f64,
+            a: 1.0,
+        }
     }
 
     pub fn fg_glyphon(&self) -> glyphon::Color {
@@ -392,6 +427,22 @@ mod tests {
     }
 
     /// Files predating `tab_bar` keep parsing (field defaults to auto).
+    /// The sRGB swapchain needs linear color values; a raw byte would
+    /// wash the palette out.
+    #[test]
+    fn srgb_channels_linearize() {        assert!((NeotermConfig::srgb8_to_linear(0) - 0.0).abs() < 1e-6);
+        assert!((NeotermConfig::srgb8_to_linear(255) - 1.0).abs() < 1e-6);
+        let expect = ((26.0f32 / 255.0 + 0.055) / 1.055).powf(2.4);
+        assert!((NeotermConfig::srgb8_to_linear(26) - expect).abs() < 1e-6);
+    }
+
+    #[test]
+    fn theme_quads_are_linear() {
+        let q = Theme::default().selection_quad();
+        assert!((q[0] - NeotermConfig::srgb8_to_linear(0x33)).abs() < 1e-6);
+        assert!((q[2] - NeotermConfig::srgb8_to_linear(0x7c)).abs() < 1e-6);
+    }
+
     #[test]
     fn legacy_config_without_tab_bar_parses() {
         let cfg: NeotermConfig = toml::from_str(
