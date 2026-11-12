@@ -12,6 +12,7 @@ use anyhow::{Context, Result};
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::io::{Read, Write};
 use std::ops::Range;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -46,12 +47,15 @@ pub type SharedTerm = Arc<Mutex<Term<TitleListener>>>;
 /// Live tab title from OSC 0/2 sequences (Ghostty-style: tabs named by
 /// the running app). Falls back to `tab-{id}`; `ResetTitle` restores it.
 /// Title changes wake the loop through the shared dirty flag so the strip
-/// re-renders immediately.
+/// re-renders immediately. The same listener catches terminal bells
+/// (`Event::Bell`) and raises the shared bell flag for the visual bell.
 #[derive(Clone)]
 pub struct TitleListener {
     title: Arc<Mutex<String>>,
     fallback: String,
     dirty: Arc<AtomicBool>,
+    /// Set when the app rang the bell; drained by the main loop.
+    bell: Arc<AtomicBool>,
     proxy: Option<EventLoopProxy<()>>,
 }
 
@@ -59,6 +63,7 @@ impl TitleListener {
     fn new(
         fallback: String,
         dirty: Arc<AtomicBool>,
+        bell: Arc<AtomicBool>,
         proxy: Option<EventLoopProxy<()>>,
     ) -> (Self, Arc<Mutex<String>>) {
         let title = Arc::new(Mutex::new(fallback.clone()));
@@ -67,6 +72,7 @@ impl TitleListener {
                 title: Arc::clone(&title),
                 fallback,
                 dirty,
+                bell,
                 proxy,
             },
             title,
@@ -79,6 +85,7 @@ impl TitleListener {
         Self::new(
             fallback.to_string(),
             Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
             None,
         )
     }
@@ -89,6 +96,17 @@ impl EventListener for TitleListener {
         match event {
             Event::Title(t) => self.set_title(t),
             Event::ResetTitle => self.set_title(self.fallback.clone()),
+            Event::Bell => {
+                // The reader thread must never touch the UI: raise a flag
+                // and let the main loop start the flash.
+                log::debug!("bell: app rang the bell");
+                self.bell.store(true, Ordering::Relaxed);
+                if !self.dirty.swap(true, Ordering::Relaxed) {
+                    if let Some(p) = &self.proxy {
+                        let _ = p.send_event(());
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -124,6 +142,9 @@ pub struct Pane {
     /// Set by the PTY reader thread when the shell exits (PTY EOF or read
     /// error). The main loop reaps dead tabs (`exit` closes the tab).
     pub dead: Arc<AtomicBool>,
+    /// Set when the app rang the bell (BEL). Drained by the main loop,
+    /// which turns it into a visual flash.
+    pub bell: Arc<AtomicBool>,
     /// Theme ANSI palette (16 entries) + cursor color, applied to named
     /// colors at resolve time. Refreshed on config reload.
     palette: [(u8, u8, u8); 16],
@@ -140,6 +161,7 @@ impl Pane {
         rows: u16,
         title_fallback: String,
         proxy: EventLoopProxy<()>,
+        cwd: &Path,
     ) -> Result<Self> {
         let pty_system = native_pty_system();
         let pair = pty_system
@@ -154,7 +176,7 @@ impl Pane {
         let mut cmd = CommandBuilder::new(&cfg.shell);
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
-        cmd.cwd(std::env::var("HOME").unwrap_or_else(|_| "/".to_string()));
+        cmd.cwd(cwd);
 
         let child = pair.slave.spawn_command(cmd).context("spawn shell")?;
 
@@ -168,9 +190,11 @@ impl Pane {
         // Slots shared with the title listener must exist before Term::new.
         let dirty = Arc::new(AtomicBool::new(true)); // ensure first paint
         let dead = Arc::new(AtomicBool::new(false));
+        let bell = Arc::new(AtomicBool::new(false));
         let (listener, title) = TitleListener::new(
             title_fallback,
             Arc::clone(&dirty),
+            Arc::clone(&bell),
             Some(proxy.clone()),
         );
         let term = Term::new(term_config, &size, listener);
@@ -227,6 +251,7 @@ impl Pane {
             _child: child,
             dirty,
             dead,
+            bell,
             palette: cfg.theme.palette_rgb(),
             cursor_rgb: cfg.theme.cursor_rgb(),
             last_cursor: Mutex::new((0, 0)),
@@ -789,6 +814,11 @@ pub struct Tab {
     /// Per-pane grid sizes (drag-resize only touches changed panes).
     sizes: HashMap<PaneId, (usize, usize)>,
     tab_id: usize,
+    /// Directory new panes start their shell in.
+    cwd: PathBuf,
+    /// Manually set title. While set, OSC titles are ignored (the pin
+    /// wins) until the pin is cleared.
+    pinned_title: Option<String>,
 }
 
 impl Tab {
@@ -799,6 +829,7 @@ impl Tab {
         tab_id: usize,
         pane_id: PaneId,
         proxy: EventLoopProxy<()>,
+        cwd: &Path,
     ) -> Result<Self> {
         let pane = Pane::new(
             cfg,
@@ -806,6 +837,7 @@ impl Tab {
             rows,
             format!("tab-{}", tab_id),
             proxy,
+            cwd,
         )?;
         let mut panes = HashMap::new();
         panes.insert(pane_id, pane);
@@ -824,6 +856,8 @@ impl Tab {
             },
             sizes,
             tab_id,
+            cwd: cwd.to_path_buf(),
+            pinned_title: None,
         })
     }
 
@@ -941,6 +975,7 @@ impl Tab {
             rect.rows as u16,
             format!("tab-{}", self.tab_id),
             proxy,
+            &self.cwd,
         )?;
         self.panes.insert(new_id, pane);
         if let Some(root) = self.root.as_mut() {
@@ -1152,17 +1187,49 @@ impl Tab {
         self.active_pane().map(|p| p.grid_size()).unwrap_or((80, 24))
     }
 
-    /// Tab title: the active pane's live OSC title (falls back per pane).
+    /// Tab title: the manual pin when set, else the active pane's live
+    /// OSC title (falls back per pane).
     pub fn title(&self) -> String {
-        self.active_pane()
+        let live = self
+            .active_pane()
             .map(|p| p.title())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        resolve_title(self.pinned_title.as_deref(), &live)
+    }
+
+    /// Pin a manual title (or clear the pin with `None` / a blank name).
+    pub fn set_pin(&mut self, name: Option<String>) {
+        self.pinned_title = name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
+    }
+
+    pub fn pinned(&self) -> bool {
+        self.pinned_title.is_some()
+    }
+
+    /// Drain bell flags from every pane. True when any pane rang.
+    pub fn take_bell(&self) -> bool {
+        let mut rang = false;
+        for p in self.panes.values() {
+            if p.bell.swap(false, Ordering::Relaxed) {
+                rang = true;
+            }
+        }
+        rang
     }
 
     pub fn apply_config(&mut self, cfg: &NeotermConfig) {
         for p in self.panes.values_mut() {
             p.apply_config(cfg);
         }
+    }
+}
+
+/// Resolve a tab's displayed title: a manual pin wins over the live OSC
+/// title; a blank pin is treated as no pin.
+pub fn resolve_title(pinned: Option<&str>, live: &str) -> String {
+    match pinned {
+        Some(p) if !p.trim().is_empty() => p.to_string(),
+        _ => live.to_string(),
     }
 }
 
@@ -1624,9 +1691,35 @@ mod tests {
         assert_eq!(*slot.lock().unwrap(), "second");
     }
 
+    /// A manual pin wins over the live OSC title; a blank pin does not.
+    #[test]
+    fn pinned_title_overrides_live_title() {
+        assert_eq!(resolve_title(Some("build"), "vim"), "build");
+        assert_eq!(resolve_title(None, "vim"), "vim");
+        assert_eq!(resolve_title(Some("   "), "vim"), "vim");
+    }
+
+    /// A BEL from the app raises the bell flag and wakes the loop so the
+    /// visual bell is drawn.
+    #[test]
+    fn bell_event_raises_flag() {
+        let dirty = Arc::new(AtomicBool::new(false));
+        let bell = Arc::new(AtomicBool::new(false));
+        let (listener, _title) = TitleListener::new(
+            "tab-1".to_string(),
+            Arc::clone(&dirty),
+            Arc::clone(&bell),
+            None,
+        );
+        listener.send_event(Event::Bell);
+        assert!(bell.load(Ordering::Relaxed));
+        assert!(dirty.load(Ordering::Relaxed));
+    }
+
     /// Named colors resolve through the theme palette, not the xterm table.
     #[test]
-    fn theme_palette_overrides_named_colors() {        let size = TermSize { cols: 20, rows: 10 };
+    fn theme_palette_overrides_named_colors() {
+        let size = TermSize { cols: 20, rows: 10 };
         let mut term = Term::new(TermConfig::default(), &size, TitleListener::headless("tab-0").0);
         feed(&mut term, "\x1b[31mred\x1b[0m \x1b[38;5;1midx");
         let palette = Theme::default().palette_rgb();

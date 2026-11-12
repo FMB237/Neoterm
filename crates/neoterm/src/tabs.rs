@@ -1,4 +1,5 @@
 use anyhow::Result;
+use std::path::PathBuf;
 use winit::event_loop::EventLoopProxy;
 
 use crate::config::NeotermConfig;
@@ -12,11 +13,17 @@ pub struct Tabs {
     next_pane: PaneId,
     cols: u16,
     rows: u16,
+    /// Directory every new shell starts in (from `--working-directory`).
+    cwd: PathBuf,
     proxy: EventLoopProxy<()>,
 }
 
 impl Tabs {
-    pub fn new(cfg: &NeotermConfig, proxy: EventLoopProxy<()>) -> Result<Self> {
+    pub fn new(
+        cfg: &NeotermConfig,
+        proxy: EventLoopProxy<()>,
+        cwd: PathBuf,
+    ) -> Result<Self> {
         let mut t = Self {
             tabs: Vec::new(),
             active: 0,
@@ -24,6 +31,7 @@ impl Tabs {
             next_pane: 1,
             cols: cfg.cols,
             rows: cfg.rows,
+            cwd,
             proxy,
         };
         t.new_tab(cfg)?;
@@ -38,7 +46,15 @@ impl Tabs {
 
     pub fn new_tab(&mut self, cfg: &NeotermConfig) -> Result<()> {
         let pane = self.alloc_pane();
-        let tab = Tab::new(cfg, self.cols, self.rows, self.next_id, pane, self.proxy.clone())?;
+        let tab = Tab::new(
+            cfg,
+            self.cols,
+            self.rows,
+            self.next_id,
+            pane,
+            self.proxy.clone(),
+            &self.cwd,
+        )?;
         self.next_id += 1;
         self.tabs.push(tab);
         self.active = self.tabs.len() - 1;
@@ -154,6 +170,24 @@ impl Tabs {
         self.tabs.get_mut(idx)
     }
 
+    /// Pin (or clear) the manual title of the tab at `idx`.
+    pub fn set_pin(&mut self, idx: usize, name: Option<String>) {
+        if let Some(t) = self.tabs.get_mut(idx) {
+            t.set_pin(name);
+        }
+    }
+
+    /// Pin (or clear) the manual title of the active tab.
+    pub fn set_active_pin(&mut self, name: Option<String>) {
+        let idx = self.active;
+        self.set_pin(idx, name);
+    }
+
+    /// Drop the manual title of the active tab (live OSC titles return).
+    pub fn unpin_active(&mut self) {
+        self.set_active_pin(None);
+    }
+
     pub fn active_index(&self) -> usize {
         self.active
     }
@@ -170,6 +204,18 @@ impl Tabs {
     /// output since the last call.
     pub fn take_dirty(&self) -> bool {
         self.tabs.iter().any(|t| t.take_dirty())
+    }
+
+    /// Drain bell flags from every pane of every tab. True when the app
+    /// rang the bell (visual bell).
+    pub fn take_bell(&self) -> bool {
+        let mut rang = false;
+        for t in &self.tabs {
+            if t.take_bell() {
+                rang = true;
+            }
+        }
+        rang
     }
 
     /// Refresh theme colors on all tabs after a config reload.

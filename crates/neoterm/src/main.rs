@@ -5,19 +5,21 @@ mod renderer;
 mod tab;
 mod tabs;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use alacritty_terminal::index::{Column, Line, Point, Side};
 use alacritty_terminal::selection::SelectionType;
 use alacritty_terminal::term::TermMode;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use arboard::{Clipboard, GetExtLinux, LinuxClipboardKind, SetExtLinux};
 use clap::Parser;
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalPosition;
-use winit::event::{ElementState, Modifiers, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, KeyEvent, Modifiers, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
+use winit::keyboard::{Key, NamedKey};
 use winit::window::{CursorIcon, Window, WindowId};
 
 use config::NeotermConfig;
@@ -32,6 +34,10 @@ struct Args {
     /// Command / shell to run (overrides config)
     #[arg(short = 'e', long)]
     command: Option<String>,
+
+    /// Directory to start the shell in (default: $HOME)
+    #[arg(short = 'w', long, value_name = "DIR")]
+    working_directory: Option<PathBuf>,
 }
 
 struct App {
@@ -39,6 +45,9 @@ struct App {
     renderer: Option<Renderer>,
     tabs: Option<Tabs>,
     cfg: NeotermConfig,
+    /// Directory every shell starts in (from `--working-directory`, else
+    /// `$HOME`). Launch-time only: a config reload never moves the shell.
+    cwd: PathBuf,
     /// Session-only font zoom override; `None` follows `cfg.font_size`.
     /// Config reloads keep an active zoom instead of snapping back.
     font_override: Option<f32>,
@@ -59,6 +68,10 @@ struct App {
     /// by our process, so this is kept alive for the whole session instead
     /// of opening/closing per operation.
     clipboard: Option<Clipboard>,
+    /// Visual bell: the body flashes until this instant.
+    bell_flash_until: Option<Instant>,
+    /// In-progress tab rename (Ctrl+Shift+R): the text being edited.
+    rename: Option<RenameState>,
     // ---- mouse state (Stage 4) ----
     /// Last known cursor position in physical pixels.
     cursor_pos: Option<PhysicalPosition<f64>>,
@@ -98,13 +111,23 @@ struct SplitDrag {
     parent: CellRect,
 }
 
+/// Live tab rename: which tab is being edited and the text so far.
+struct RenameState {
+    tab: usize,
+    text: String,
+    /// The prefilled title is still untouched: the first keystroke
+    /// replaces it (like selected text in a rename field).
+    fresh: bool,
+}
+
 impl App {
-    fn new(cfg: NeotermConfig, proxy: EventLoopProxy<()>) -> Self {
+    fn new(cfg: NeotermConfig, proxy: EventLoopProxy<()>, cwd: PathBuf) -> Self {
         Self {
             window: None,
             renderer: None,
             tabs: None,
             cfg,
+            cwd,
             font_override: None,
             mods: Modifiers::default(),
             config_rx: None,
@@ -118,6 +141,8 @@ impl App {
             force_draw: true, // ensure first paint
             last_strip: true,
             clipboard: None,
+            bell_flash_until: None,
+            rename: None,
             cursor_pos: None,
             selecting: false,
             left_held: false,
@@ -369,6 +394,95 @@ impl App {
         self.apply_font_size(self.cfg.font_size);
     }
 
+    /// Ctrl+Shift+R: start editing the active tab's title. The strip
+    /// shows the text being typed; Enter commits (and pins it), Esc
+    /// cancels.
+    fn start_rename(&mut self) {
+        let (tab, text) = match self.tabs.as_ref() {
+            Some(tabs) => (
+                tabs.active_index(),
+                tabs.active().map(|t| t.title()).unwrap_or_default(),
+            ),
+            None => return,
+        };
+        self.rename = Some(RenameState {
+            tab,
+            text,
+            fresh: true,
+        });
+        self.force_draw = true;
+        self.request_redraw();
+    }
+
+    /// Keyboard input while a rename is live: every key edits the title.
+    fn on_rename_key(&mut self, event: &KeyEvent) {
+        /// What the key did.
+        enum Next {
+            Commit(String),
+            Cancel,
+            Edit,
+        }
+
+        // Only key *presses* edit the title (winit also delivers releases).
+        if event.state != ElementState::Pressed {
+            return;
+        }
+        let ctrl = self.mods.state().control_key();
+        let next = {
+            let Some(state) = self.rename.as_mut() else {
+                return;
+            };
+            match &event.logical_key {
+                Key::Named(NamedKey::Enter) => Next::Commit(state.text.trim().to_string()),
+                Key::Named(NamedKey::Escape) => Next::Cancel,
+                Key::Named(NamedKey::Backspace) => {
+                    state.text.pop();
+                    state.fresh = false;
+                    Next::Edit
+                }
+                _ => {
+                    if ctrl {
+                        // Ctrl+U clears the field; other chords are ignored.
+                        if let Key::Character(c) = &event.logical_key {
+                            if c.eq_ignore_ascii_case("u") {
+                                state.text.clear();
+                                state.fresh = false;
+                            }
+                        }
+                    } else if let Some(text) = &event.text {
+                        // Ignore control characters (they are commands,
+                        // not title text).
+                        if !text.chars().any(|c| c.is_control()) {
+                            // The prefilled title behaves like selected
+                            // text: the first keystroke replaces it.
+                            if state.fresh {
+                                state.text.clear();
+                                state.fresh = false;
+                            }
+                            state.text.push_str(text);
+                        }
+                    }
+                    Next::Edit
+                }
+            }
+        };
+
+        match next {
+            Next::Commit(name) => {
+                let tab = self.rename.as_ref().map(|s| s.tab).unwrap_or(0);
+                self.rename = None;
+                if let Some(tabs) = self.tabs.as_mut() {
+                    // An empty name clears the pin (live OSC titles return).
+                    tabs.set_pin(tab, if name.is_empty() { None } else { Some(name) });
+                }
+            }
+            Next::Cancel => self.rename = None,
+            Next::Edit => {}
+        }
+        self.force_draw = true;
+        self.request_redraw();
+    }
+
     fn request_redraw(&self) {
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
@@ -377,8 +491,25 @@ impl App {
 
     /// Whether the tab strip is currently visible (Ghostty auto-hide).
     fn strip_on(&self) -> bool {
+        // While renaming, the strip must be visible: that is where the
+        // text is being edited.
+        if self.rename.is_some() {
+            return true;
+        }
         let n = self.tabs.as_ref().map(|t| t.len()).unwrap_or(0);
         mouse::strip_visible(n, &self.cfg.tab_bar)
+    }
+
+    /// Tab titles as shown in the strip, with an in-progress rename
+    /// substituted in (the caret is the trailing underscore).
+    fn tab_titles(&self) -> Vec<String> {
+        let mut titles = self.tabs.as_ref().map(|t| t.titles()).unwrap_or_default();
+        if let Some(r) = &self.rename {
+            if let Some(slot) = titles.get_mut(r.tab) {
+                *slot = format!("{}_", r.text);
+            }
+        }
+        titles
     }
 
     /// Resolve physical-pixel coordinates to the pane under the cursor:
@@ -490,7 +621,7 @@ impl App {
             if pos.y as f32 >= g.3 {
                 return None;
             }
-            let titles = tabs.titles();
+            let titles = self.tab_titles();
             let adv = g.0 / scale.max(f32::EPSILON);
             let regions = mouse::tab_regions(&titles, tabs.active_index(), adv, renderer::TAB_LEFT * scale, scale);
             mouse::tab_hit(&regions, pos.x as f32)
@@ -506,7 +637,7 @@ impl App {
                 if pos.y as f32 >= g.3 {
                     return None;
                 }
-                let titles = tabs.titles();
+                let titles = self.tab_titles();
                 let adv = g.0 / scale.max(f32::EPSILON);
                 mouse::tab_new_hit(&titles, tabs.active_index(), adv, renderer::TAB_LEFT * scale, scale, pos.x as f32)
                     .then_some(())
@@ -528,7 +659,7 @@ impl App {
                 let tabs = self.tabs.as_ref()?;
                 let scale = window.scale_factor() as f32;
                 let g = renderer.body_geometry(scale, self.strip_on());
-                let titles = tabs.titles();
+                let titles = self.tab_titles();
                 let adv = g.0 / scale.max(f32::EPSILON);
                 mouse::tab_close_hit(
                     &titles,
@@ -751,7 +882,7 @@ impl App {
             if pos.y as f32 >= g.3 {
                 return None;
             }
-            let titles = tabs.titles();
+            let titles = self.tab_titles();
             let adv = g.0 / scale.max(f32::EPSILON);
             let regions =
                 mouse::tab_regions(&titles, tabs.active_index(), adv, renderer::TAB_LEFT * scale, scale);
@@ -1042,7 +1173,8 @@ impl ApplicationHandler for App {
 
         let renderer = pollster::block_on(Renderer::new(window.clone(), event_loop, &self.cfg));
 
-        let tabs = Tabs::new(&self.cfg, self.proxy.clone()).expect("spawn initial tab");
+        let tabs = Tabs::new(&self.cfg, self.proxy.clone(), self.cwd.clone())
+            .expect("spawn initial tab");
         // Sync initial grid size with window.
         let size = window.inner_size();
 
@@ -1075,6 +1207,12 @@ impl ApplicationHandler for App {
                 self.mods = m;
             }
             WindowEvent::KeyboardInput { event, .. } => {
+                // A live rename owns the keyboard: every key edits the
+                // title instead of reaching the shell.
+                if self.rename.is_some() {
+                    self.on_rename_key(&event);
+                    return;
+                }
                 let alt = self
                     .tabs
                     .as_ref()
@@ -1152,6 +1290,23 @@ impl ApplicationHandler for App {
                     InputAction::FontZoomIn => self.zoom_font(1.0),
                     InputAction::FontZoomOut => self.zoom_font(-1.0),
                     InputAction::FontZoomReset => self.reset_font(),
+                    InputAction::RenameTab => self.start_rename(),
+                    InputAction::UnpinTab => {
+                        let was_pinned = self
+                            .tabs
+                            .as_ref()
+                            .and_then(|t| t.active())
+                            .map(|t| t.pinned())
+                            .unwrap_or(false);
+                        if let Some(tabs) = self.tabs.as_mut() {
+                            tabs.unpin_active();
+                        }
+                        if !was_pinned {
+                            log::info!("tab title was not pinned");
+                        }
+                        self.force_draw = true;
+                        self.request_redraw();
+                    }
                     InputAction::NextTab => {
                         if let Some(tabs) = self.tabs.as_mut() {
                             tabs.next();
@@ -1222,7 +1377,7 @@ impl ApplicationHandler for App {
                 let Some(tabs) = self.tabs.as_ref() else {
                     return;
                 };
-                let titles = tabs.titles();
+                let titles = self.tab_titles();
                 let active = tabs.active_index();
                 let blink = self.blink_on;
                 let strip = self.strip_on();
@@ -1284,6 +1439,12 @@ impl ApplicationHandler for App {
                             rows: 24,
                             pane: None,
                         });
+                    // Visual bell: tint the body while the flash runs.
+                    let flash = self
+                        .bell_flash_until
+                        .map(|until| Instant::now() < until)
+                        .unwrap_or(false);
+                    r.set_flash(flash);
                     r.draw(&titles, t.active_index(), &panes, &divs, scroll, strip);
                 }
                 self.last_titles = titles;
@@ -1337,6 +1498,26 @@ impl ApplicationHandler for App {
             event_loop.exit();
             return;
         }
+        // Visual bell: a BEL from any pane flashes the body briefly. The
+        // flag is drained even when the bell is disabled, so it never
+        // lingers.
+        let rang = self.tabs.as_ref().map(|t| t.take_bell()).unwrap_or(false);
+        if rang {
+            log::debug!("bell: detected (enabled={})", self.cfg.bell_enabled());
+        }
+        if rang && self.cfg.bell_enabled() {
+            self.bell_flash_until = Some(Instant::now() + Duration::from_millis(180));
+            self.force_draw = true;
+            self.request_redraw();
+        }
+        // Flash over: paint the normal background again.
+        if let Some(until) = self.bell_flash_until {
+            if Instant::now() >= until {
+                self.bell_flash_until = None;
+                self.force_draw = true;
+                self.request_redraw();
+            }
+        }
         // Cursor blink at ~2Hz. No unconditional redraw/sleep anymore:
         // the loop parks in the OS until input, PTY output (user_event),
         // resize, or the next blink deadline wakes it.
@@ -1347,9 +1528,14 @@ impl ApplicationHandler for App {
                 w.request_redraw();
             }
         }
-        event_loop.set_control_flow(ControlFlow::WaitUntil(
-            self.last_blink + Duration::from_millis(500),
-        ));
+        // Wake for the blink deadline, or earlier when a bell flash is
+        // still running (so the flash can be cleared on time).
+        let blink_deadline = self.last_blink + Duration::from_millis(500);
+        let deadline = match self.bell_flash_until {
+            Some(until) => until.min(blink_deadline),
+            None => blink_deadline,
+        };
+        event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
     }
 }
 
@@ -1361,11 +1547,28 @@ fn main() -> Result<()> {
     if let Some(cmd) = args.command {
         cfg.shell = cmd;
     }
+    let cwd = resolve_cwd(args.working_directory)?;
+
     let event_loop = EventLoop::new().expect("create event loop");
     event_loop.set_control_flow(ControlFlow::Wait);
 
     let proxy = event_loop.create_proxy();
-    let mut app = App::new(cfg, proxy);
+    let mut app = App::new(cfg, proxy, cwd);
     event_loop.run_app(&mut app).expect("run app");
     Ok(())
+}
+
+/// Resolve the directory shells start in: `--working-directory` when given
+/// (must exist and be a directory), otherwise the user's home.
+fn resolve_cwd(dir: Option<PathBuf>) -> Result<PathBuf> {
+    let Some(dir) = dir else {
+        return Ok(dirs::home_dir().unwrap_or_else(|| PathBuf::from("/")));
+    };
+    let path = dir
+        .canonicalize()
+        .with_context(|| format!("--working-directory: {}", dir.display()))?;
+    if !path.is_dir() {
+        anyhow::bail!("--working-directory is not a directory: {}", path.display());
+    }
+    Ok(path)
 }

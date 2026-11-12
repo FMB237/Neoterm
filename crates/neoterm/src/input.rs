@@ -30,6 +30,10 @@ pub enum InputAction {
     FontZoomIn,
     FontZoomOut,
     FontZoomReset,
+    /// Start editing the active tab's title (Ctrl+Shift+R).
+    RenameTab,
+    /// Drop the active tab's manual title, back to the live OSC one.
+    UnpinTab,
     Ignored,
 }
 
@@ -138,6 +142,8 @@ fn chrome_action(key: &Key, mods: ModifiersState) -> Option<InputAction> {
                 "+" | "=" => return Some(InputAction::FontZoomIn),
                 "-" | "_" => return Some(InputAction::FontZoomOut),
                 "0" | ")" => return Some(InputAction::FontZoomReset),
+                "R" => return Some(InputAction::RenameTab),
+                "U" => return Some(InputAction::UnpinTab),
                 _ => {}
             },
             Key::Named(NamedKey::Tab) => return Some(InputAction::NextTab),
@@ -224,5 +230,20 @@ mod tests {
         assert!(matches!(press("C", ctrl_shift()), Some(InputAction::Copy)));
         // Plain symbols are not chrome.
         assert!(press("+", ModifiersState::empty()).is_none());
+    }
+
+    /// Tab rename / unpin shortcuts.
+    #[test]
+    fn rename_shortcuts_map() {
+        assert!(matches!(
+            press("R", ctrl_shift()),
+            Some(InputAction::RenameTab)
+        ));
+        assert!(matches!(
+            press("U", ctrl_shift()),
+            Some(InputAction::UnpinTab)
+        ));
+        // Lowercase (no shift) is not a chrome shortcut.
+        assert!(press("r", ModifiersState::CONTROL).is_none());
     }
 }

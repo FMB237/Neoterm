@@ -110,6 +110,11 @@ pub struct Renderer {
     pane_rows: HashMap<PaneId, Vec<RowContent>>,
     window: Arc<Window>,
     bg: wgpu::Color,
+    /// Visual-bell clear color: the body background tinted toward the
+    /// cursor color.
+    flash_bg: wgpu::Color,
+    /// Visual bell active for this frame.
+    flash: bool,
     fg: Color,
     font_size: f32,
     /// Resolved font family; `None` = cosmic-text's generic `Monospace`.
@@ -247,6 +252,8 @@ impl Renderer {
             pane_rows: HashMap::new(),
             window,
             bg: cfg.bg_wgpu(),
+            flash_bg: flash_color(cfg),
+            flash: false,
             fg: cfg.fg_glyphon(),
             font_size,
             font_family,
@@ -284,6 +291,7 @@ impl Renderer {
 
     pub fn apply_config(&mut self, cfg: &NeotermConfig) {
         self.bg = cfg.bg_wgpu();
+        self.flash_bg = flash_color(cfg);
         self.fg = cfg.fg_glyphon();
         self.sel_bg = cfg.theme.selection_quad();
         self.track_bg = cfg.theme.scrollbar_track_quad();
@@ -313,6 +321,11 @@ impl Renderer {
             self.tab_buffer.set_metrics(m2);
             self.measured_advance = self.probe_advance();
         }
+    }
+
+    /// Visual bell: flash the body background for one frame.
+    pub fn set_flash(&mut self, on: bool) {
+        self.flash = on;
     }
 
     /// Runtime font zoom (session-only): retargets every text buffer and
@@ -855,7 +868,7 @@ impl Renderer {
                     depth_slice: None,
                     resolve_target: None,
                     ops: Operations {
-                        load: LoadOp::Clear(self.bg),
+                        load: LoadOp::Clear(if self.flash { self.flash_bg } else { self.bg }),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -939,6 +952,23 @@ fn resolve_family(font_system: &mut FontSystem, spec: &str) -> Option<String> {
 /// RGBA quad color from a theme RGB triplet.
 fn with_alpha(col: [f32; 3], a: f32) -> [f32; 4] {
     [col[0], col[1], col[2], a]
+}
+
+/// Visual-bell clear color: the body background tinted toward the cursor
+/// color. Built in linear space (the swapchain is an sRGB target).
+fn flash_color(cfg: &NeotermConfig) -> wgpu::Color {
+    let bg = cfg.bg_wgpu();
+    let (r, g, b) = cfg.theme.cursor_rgb();
+    let mix = |base: f64, to: u8| {
+        let to = NeotermConfig::srgb8_to_linear(to) as f64;
+        base + (to - base) * 0.22
+    };
+    wgpu::Color {
+        r: mix(bg.r, r),
+        g: mix(bg.g, g),
+        b: mix(bg.b, b),
+        a: 1.0,
+    }
 }
 
 /// Append a solid-color quad (two triangles) in NDC coordinates.

@@ -262,11 +262,18 @@ pub struct NeotermConfig {
     /// `"always"`, or `"never"` (keybind-only tab switching).
     #[serde(default = "default_tab_bar")]
     pub tab_bar: String,
+    /// Terminal bell: `"visual"` flashes the body, `"none"` ignores BEL.
+    #[serde(default = "default_bell")]
+    pub bell: String,
     pub theme: Theme,
 }
 
 fn default_tab_bar() -> String {
     "auto".to_string()
+}
+
+fn default_bell() -> String {
+    "visual".to_string()
 }
 
 impl Default for NeotermConfig {
@@ -279,12 +286,17 @@ impl Default for NeotermConfig {
             scrollback_lines: 10_000,
             shell: std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string()),
             tab_bar: default_tab_bar(),
+            bell: default_bell(),
             theme: Theme::default(),
         }
     }
 }
 
 impl NeotermConfig {
+    /// Visual bell enabled? Anything other than `"none"` flashes.
+    pub fn bell_enabled(&self) -> bool {
+        !self.bell.eq_ignore_ascii_case("none")
+    }
 
     pub fn path() -> Option<PathBuf> {
         dirs::config_dir().map(|d| d.join("neoterm").join("config.toml"))
@@ -427,10 +439,52 @@ mod tests {
     }
 
     /// Files predating `tab_bar` keep parsing (field defaults to auto).
+    /// The bell option is optional and defaults to the visual bell.
+    #[test]
+    fn bell_option_defaults_to_visual() {
+        assert!(NeotermConfig::default().bell_enabled());
+
+        let cfg: NeotermConfig = toml::from_str(
+            r#"
+            font_family = "monospace"
+            font_size = 15.0
+            cols = 80
+            rows = 24
+            scrollback_lines = 1000
+            shell = "/bin/bash"
+            bell = "none"
+
+            [theme]
+        "#,
+        )
+        .expect("config parses");
+        assert!(!cfg.bell_enabled());
+    }
+
+    /// Legacy configs without a `bell` key keep the visual bell.
+    #[test]
+    fn legacy_config_without_bell_keeps_visual_bell() {
+        let cfg: NeotermConfig = toml::from_str(
+            r#"
+            font_family = "monospace"
+            font_size = 15.0
+            cols = 80
+            rows = 24
+            scrollback_lines = 1000
+            shell = "/bin/bash"
+
+            [theme]
+        "#,
+        )
+        .expect("config parses");
+        assert!(cfg.bell_enabled());
+    }
+
     /// The sRGB swapchain needs linear color values; a raw byte would
     /// wash the palette out.
     #[test]
-    fn srgb_channels_linearize() {        assert!((NeotermConfig::srgb8_to_linear(0) - 0.0).abs() < 1e-6);
+    fn srgb_channels_linearize() {
+        assert!((NeotermConfig::srgb8_to_linear(0) - 0.0).abs() < 1e-6);
         assert!((NeotermConfig::srgb8_to_linear(255) - 1.0).abs() < 1e-6);
         let expect = ((26.0f32 / 255.0 + 0.055) / 1.055).powf(2.4);
         assert!((NeotermConfig::srgb8_to_linear(26) - expect).abs() < 1e-6);
