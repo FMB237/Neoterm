@@ -218,6 +218,16 @@ design notes and the two bugs that the visual pass caught.
 
 ### Batch B — medium items — **next up**
 
+- **B0. Global UI pass** — the interface work specified in
+  [`docs/ui-pass.md`](docs/ui-pass.md), with the mockup in
+  [`docs/mockups/NeoTerm UI Pass.html`](docs/mockups/NeoTerm%20UI%20Pass.html).
+  Six items, in order: (1) cursor drawn *behind* the glyph so it stops hiding
+  the character under it — a real fidelity bug, not a taste call; (2) a focus
+  indicator for split panes; (3) copy/paste feedback in the strip; (4) hover
+  states on tabs; (5) the tab label redesign (dim index badge, clean title,
+  close mark on hover); (6) a hairline under the strip. New theme fields:
+  `tab_bar_border`, `tab_index_fg`, `focus_outline`. Direction: *quiet
+  chrome* — nothing permanent, nothing decorative.
 - **B1. Scrollback search** — `Ctrl+Shift+F`, search the focused pane's
   history + viewport, jump to the match, and highlight every match through the
   existing bg-rect pass (`RowContent::bg_rects` already supports per-cell

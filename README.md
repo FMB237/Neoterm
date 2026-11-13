@@ -102,8 +102,20 @@ cargo build --release  # optimized (LTO)
 
 Rust 2021. No system libraries beyond the GPU stack (Vulkan or GL).
 
-## Architecture
+## Design
 
+The interface follows one rule: **quiet chrome**. Chrome appears when it is
+relevant and fades when it is not.
+
+- [`docs/mockups/NeoTerm UI Pass.html`](docs/mockups/NeoTerm%20UI%20Pass.html)
+  — the current UI next to the proposed one: a tab strip that reads as
+  titles instead of debug output, hover states, a focus indicator for splits,
+  copy/paste feedback, and a cursor that no longer hides the character under
+  it. Open it in a browser and hover the tabs.
+- [`docs/ui-pass.md`](docs/ui-pass.md) — the implementation plan behind that
+  mockup: exact tokens, the files involved, and the acceptance criteria.
+
+## Architecture
 ```
 winit events ─▶ input::map_key ─▶ InputAction ─▶ App (main.rs)
                                                       │

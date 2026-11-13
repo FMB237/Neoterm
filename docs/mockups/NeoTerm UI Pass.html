@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>NeoTerm — Global UI pass</title>
+<style>
+/* ============================================================================
+   NeoTerm UI pass — visual mockup
+   Palette + geometry are taken verbatim from the app (crates/neoterm/src):
+     config.rs   -> Tokyo Night theme tokens
+     renderer.rs -> padding (12px), line height (1.35), strip height (font*1.3+16)
+   ========================================================================== */
+
+:root{
+  /* --- app theme: tokyo-night (config.rs) --- */
+  --nt-bg:        #1a1b26;
+  --nt-fg:        #c0caf5;
+  --nt-cursor:    #c0caf5;
+  --nt-selection: #33467c;
+  --nt-accent:    #7aa2f7;   /* tab_active_fg / tab_accent */
+  --nt-inactive:  #565f89;   /* tab_inactive_fg */
+  --nt-close:     #737aa2;   /* tab_close_fg */
+  --nt-track:     #16161e;   /* scrollbar_track */
+  --nt-thumb:     #3b4261;   /* scrollbar_thumb */
+  --nt-pane:      #292e42;   /* tab_active_bg (reserved) */
+
+  /* --- proposed additions --- */
+  --nt-hairline:  #2b2c3d;   /* strip/body separator */
+  --nt-index:     #4a5170;   /* dimmed tab index badge */
+  --nt-outline:   rgba(122,162,247,.38); /* focused-pane outline */
+  --nt-cursorblock: rgba(192,202,245,.42);/* cursor block behind the glyph */
+
+  /* --- page chrome (not part of the app) --- */
+  --page:         #0c0d13;
+  --page-2:       #12131b;
+  --page-line:    #23242f;
+  --page-text:    #b9bdd4;
+  --page-dim:     #6b7089;
+  --page-accent:  #7aa2f7;
+
+  --mono: "JetBrains Mono", "DejaVu Sans Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+  /* --- app geometry (mirrors renderer.rs) --- */
+  --fs: 13px;
+  --lh: 1.35;
+  --pad: 12px;
+  --strip-h: 32.9px; /* font*1.3 + 16 */
+}
+
+*{box-sizing:border-box;margin:0;padding:0}
+html{background:var(--page);color:var(--page-text);font-family:var(--mono);
+    -webkit-font-smoothing:antialiased}
+body{padding:56px 40px 96px;max-width:1240px;margin:0 auto}
+
+/* ---------- page typography ---------- */
+h1{font-size:26px;font-weight:700;color:#e6e8f5;letter-spacing:-.02em}
+.sub{margin-top:8px;color:var(--page-dim);font-size:13px;line-height:1.7;max-width:76ch}
+.rule{height:1px;background:var(--page-line);margin:44px 0 36px}
+h2{font-size:15px;font-weight:700;color:#e6e8f5;letter-spacing:.02em}
+h2 .n{color:var(--page-accent);margin-right:10px;font-weight:400}
+.lede{margin-top:10px;color:var(--page-dim);font-size:12.5px;line-height:1.75;max-width:80ch}
+.caption{margin-top:14px;color:var(--page-dim);font-size:11.5px;line-height:1.7}
+.caption b{color:#9aa0bd;font-weight:400}
+
+/* ---------- mockup frame ---------- */
+.mock{margin-top:22px;border:1px solid var(--page-line);border-radius:10px;overflow:hidden;
+      background:var(--page-2)}
+.mock-label{display:flex;align-items:baseline;gap:12px;padding:11px 16px;
+            border-bottom:1px solid var(--page-line);background:#101119;font-size:11.5px}
+.mock-label .tag{color:var(--page-accent);font-weight:700;letter-spacing:.06em;text-transform:uppercase;font-size:10px}
+.mock-label .name{color:#c9cde3}
+.mock-label .note{color:var(--page-dim);margin-left:auto}
+.stage{padding:28px;display:flex;justify-content:center;background:
+       repeating-linear-gradient(45deg,#0f1017 0 10px,#0d0e14 10px 20px)}
+
+/* ---------- the terminal window ---------- */
+.term{
+  width:860px;max-width:100%;
+  background:var(--nt-bg);color:var(--nt-fg);
+  font-family:var(--mono);font-size:var(--fs);line-height:var(--lh);
+  border-radius:8px;overflow:hidden;
+  box-shadow:0 18px 50px rgba(0,0,0,.55),0 0 0 1px rgba(255,255,255,.03);
+}
+.term .strip{
+  height:var(--strip-h);display:flex;align-items:center;gap:0;
+  padding:0 var(--pad);position:relative;
+}
+/* today: the strip is body-coloured (seamless) and nothing separates it */
+.strip.today{background:var(--nt-bg)}
+.strip.today::after{content:none}
+/* proposal: a single hairline makes the strip a legible region, nothing more */
+.strip.proposed{background:var(--nt-bg);border-bottom:1px solid var(--nt-hairline)}
+
+.tab{display:flex;align-items:center;gap:7px;height:100%;padding:0 12px;
+     position:relative;color:var(--nt-inactive);white-space:nowrap}
+.tab .idx{font-size:11px;color:var(--nt-index)}
+.tab .title{color:var(--nt-inactive)}
+.tab.active .title{color:var(--nt-accent);font-weight:700}
+.tab.active .idx{color:#6b7ba8}
+/* the active tab keeps the 2px accent underline (already shipped) */
+.tab.active::after{content:"";position:absolute;left:12px;right:12px;bottom:0;height:2px;
+                    background:var(--nt-accent);border-radius:1px 1px 0 0}
+/* close mark: hidden until hover (proposal) */
+.tab .x{font-size:12px;color:var(--nt-close);opacity:0;transition:opacity .12s ease}
+.tab:hover .x{opacity:1}
+.tab:hover .title{color:#8a93b8}
+.strip.proposed .tab:hover{background:rgba(122,162,247,.05)}
+/* today's mark is always visible, ASCII x, inside the label text */
+.tab.today-inline{display:inline-flex;align-items:center;gap:7px}
+.tab .x-today{font-size:12px;color:var(--nt-close);opacity:.85}
+/* today's labels are plain text in the shipped format: [1:title x] */
+.strip.today .raw{padding:0 0;height:auto;white-space:pre}
+.strip.today .raw.active{color:var(--nt-accent);font-weight:700}
+.strip.today .raw.idle{color:var(--nt-inactive)}
+
+.body{padding:var(--pad);min-height:212px;position:relative}
+.line{white-space:pre;height:calc(var(--fs) * var(--lh))}
+.dim{color:var(--nt-inactive)}
+.green{color:#9ece6a}
+.blue{color:#7aa2f7}
+.cyan{color:#7dcfff}
+.red{color:#f7768e}
+.prompt{color:#9ece6a}
+.path{color:#7aa2f7}
+
+/* selection */
+.sel{background:var(--nt-selection);border-radius:2px}
+
+/* cursor */
+.cursor{display:inline-block;width:1ch;height:1.15em;vertical-align:-.18em;
+        background:var(--nt-cursor);position:relative}
+.cursor.behind{background:var(--nt-cursorblock);box-shadow:0 0 0 1px rgba(192,202,245,.55) inset}
+/* today's cursor is a glyph that REPLACES the character */
+.cursor.glyph{background:var(--nt-fg);color:transparent;position:relative}
+.cursor.glyph + span{visibility:hidden}
+
+/* ---------- split panes ---------- */
+.split{display:flex;gap:0;padding:var(--pad);position:relative}
+.pane{flex:1;padding-right:10px}
+.pane.right{padding-right:0;padding-left:10px}
+.seam{width:1px;background:var(--nt-thumb);opacity:.7}
+/* proposal: the focused pane carries a 1px accent outline */
+.pane.focused{outline:1px solid var(--nt-outline);outline-offset:-1px;border-radius:3px}
+.pane.unfocused{opacity:.62}
+
+/* ---------- copy toast ---------- */
+.toast{
+  position:absolute;right:16px;top:8px;
+  background:var(--nt-pane);color:var(--nt-fg);
+  border:1px solid #33385a;border-radius:5px;
+  padding:4px 10px;font-size:11.5px;letter-spacing:.01em;
+  box-shadow:0 6px 18px rgba(0,0,0,.4);
+}
+.toast .k{color:var(--nt-accent)}
+
+/* ---------- state strip (large detail) ---------- */
+.states{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-top:22px}
+.state-card{border:1px solid var(--page-line);border-radius:8px;background:var(--page-2);overflow:hidden}
+.state-card .cap{padding:9px 12px;font-size:11px;color:var(--page-dim);border-bottom:1px solid var(--page-line)}
+.state-card .cap b{color:#9aa0bd;font-weight:400;display:block;margin-bottom:2px;font-size:11.5px}
+.state-card .strip{height:52px}
+
+/* ---------- cursor variants ---------- */
+.cursors{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-top:22px}
+.cur-card{border:1px solid var(--page-line);border-radius:8px;background:var(--page-2);padding:18px 16px}
+.cur-card .cap{font-size:11px;color:var(--page-dim);margin-bottom:14px}
+.cur-card .cap b{color:#9aa0bd;font-weight:400;display:block;margin-bottom:4px;font-size:11.5px}
+.big{font-size:19px;line-height:1.5}
+
+/* ---------- spec table ---------- */
+.spec{margin-top:22px;border:1px solid var(--page-line);border-radius:10px;overflow:hidden}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th{text-align:left;padding:11px 16px;color:var(--page-dim);font-weight:400;
+   border-bottom:1px solid var(--page-line);background:#101119;letter-spacing:.04em;
+   text-transform:uppercase;font-size:10px}
+td{padding:10px 16px;border-bottom:1px solid #1b1c26;vertical-align:top;line-height:1.6}
+tr:last-child td{border-bottom:none}
+td:first-child{color:#c9cde3;white-space:nowrap}
+td code{color:var(--nt-accent)}
+.sw{display:inline-block;width:11px;height:11px;border-radius:2px;vertical-align:-1px;
+    margin-right:8px;border:1px solid rgba(255,255,255,.14)}
+.note-inline{color:var(--page-dim)}
+
+/* ---------- issue list ---------- */
+.issues{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:22px}
+.issue{border:1px solid var(--page-line);border-left:2px solid var(--page-line);
+       border-radius:8px;background:var(--page-2);padding:16px 18px}
+.issue.sev{color:var(--page-dim);font-size:11px;letter-spacing:.06em;text-transform:uppercase;margin-bottom:8px}
+.issue h3{font-size:13.5px;color:#e6e8f5;font-weight:700;margin-bottom:8px}
+.issue p{font-size:12px;line-height:1.75;color:var(--page-dim)}
+.issue p b{color:#9aa0bd;font-weight:400}
+.issue.fix{border-left-color:var(--nt-accent)}
+
+@media (max-width: 900px){
+  .states,.cursors,.issues{grid-template-columns:1fr 1fr}
+  body{padding:32px 20px 64px}
+}
+</style>
+</head>
+<body>
+
+<h1>NeoTerm — global UI pass</h1>
+<p class="sub">
+  The terminal works; this is about how it <em>looks and feels</em>. Every value below is taken
+  from the current implementation (<code>config.rs</code> theme tokens, <code>renderer.rs</code>
+  geometry), so the proposal is not a vibe — it is a diff you can read.
+  The direction: <b style="color:#9aa0bd;font-weight:400">quiet chrome</b>. Chrome appears when it is
+  relevant and fades when it is not. Nothing permanent, nothing decorative.
+</p>
+
+<div class="rule"></div>
+
+<h2><span class="n">01</span>Today vs proposal — same scene, same geometry</h2>
+<p class="lede">
+  Left: what NeoTerm renders now. Right: the proposal. Both are drawn from the same tokens and
+  the same cell metrics, so the differences you see are the differences you would get in the app.
+</p>
+
+<div class="mock">
+  <div class="mock-label">
+    <span class="tag">today</span>
+    <span class="name">current NeoTerm</span>
+    <span class="note">seamless strip · block cursor replaces the glyph · no focus cue</span>
+  </div>
+  <div class="stage">
+    <div class="term">
+      <div class="strip today">
+        <div class="raw active">[1:bruce@host:~/projects x]</div>
+        <div class="raw idle">  2:vim x  </div>
+        <div class="raw idle">  3:htop x  </div>
+      </div>
+      <div class="split">
+        <div class="pane">
+          <div class="line"><span class="prompt">❯</span> <span class="path">~/projects</span> cargo build</div>
+          <div class="line dim">   Compiling neoterm v0.2.0</div>
+          <div class="line dim">    Finished dev profile</div>
+          <div class="line"><span class="prompt">❯</span> <span class="cursor glyph"></span><span>l</span></div>
+        </div>
+        <div class="seam"></div>
+        <div class="pane right">
+          <div class="line dim">the focused pane is</div>
+          <div class="line dim">only distinguishable by</div>
+          <div class="line dim">which cursor blinks</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="mock">
+  <div class="mock-label">
+    <span class="tag">proposal</span>
+    <span class="name">the UI pass</span>
+    <span class="note">hairline strip · index badge · close on hover · cursor behind the glyph · focus outline · copy toast</span>
+  </div>
+  <div class="stage">
+    <div class="term">
+      <div class="strip proposed">
+        <div class="tab active">
+          <span class="idx">1</span>
+          <span class="title">bruce@host:~/projects</span>
+          <span class="x">×</span>
+        </div>
+        <div class="tab">
+          <span class="idx">2</span>
+          <span class="title">vim</span>
+          <span class="x">×</span>
+        </div>
+        <div class="tab">
+          <span class="idx">3</span>
+          <span class="title">htop</span>
+          <span class="x">×</span>
+        </div>
+        <div class="toast"><span class="k">copied</span> · 42 chars</div>
+      </div>
+      <div class="split">
+        <div class="pane focused">
+          <div class="line"><span class="prompt">❯</span> <span class="path">~/projects</span> cargo build</div>
+          <div class="line dim">   Compiling neoterm v0.2.0</div>
+          <div class="line dim">    Finished dev profile</div>
+          <div class="line"><span class="prompt">❯</span> <span class="cursor behind">l</span></div>
+        </div>
+        <div class="seam"></div>
+        <div class="pane right unfocused">
+          <div class="line dim">the unfocused pane recedes,</div>
+          <div class="line dim">the focused pane is outlined</div>
+          <div class="line dim">and the cursor never hides a glyph</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="caption" style="padding:0 16px 16px">
+    <b>Hover the tabs in the strip above</b> — the close mark fades in and the label lifts one step.
+    That is the whole interaction budget: no popovers, no tooltips, no animation beyond a 120 ms opacity.
+  </p>
+</div>
+
+<div class="rule"></div>
+
+<h2><span class="n">02</span>The tab strip, in all four states</h2>
+<p class="lede">
+  The strip is the only permanent chrome in the app, so it carries the most weight per pixel.
+  Four states, one rule: <b>the active tab is the only loud thing</b>; everything else is one step back.
+</p>
+
+<div class="states">
+  <div class="state-card">
+    <div class="cap"><b>resting</b>inactive tab</div>
+    <div class="strip proposed">
+      <div class="tab"><span class="idx">2</span><span class="title">vim</span><span class="x">×</span></div>
+    </div>
+  </div>
+  <div class="state-card">
+    <div class="cap"><b>hover</b>pointer over the tab</div>
+    <div class="strip proposed">
+      <div class="tab" style="background:rgba(122,162,247,.05)">
+        <span class="idx">2</span><span class="title" style="color:#8a93b8">vim</span><span class="x" style="opacity:1">×</span>
+      </div>
+    </div>
+  </div>
+  <div class="state-card">
+    <div class="cap"><b>active</b>focused tab</div>
+    <div class="strip proposed">
+      <div class="tab active"><span class="idx">2</span><span class="title">vim</span><span class="x">×</span></div>
+    </div>
+  </div>
+  <div class="state-card">
+    <div class="cap"><b>pinned</b>manually renamed</div>
+    <div class="strip proposed">
+      <div class="tab"><span class="idx">2</span><span class="title" style="color:#bb9af7">deploy</span><span class="x">×</span></div>
+    </div>
+  </div>
+</div>
+
+<p class="caption">
+  The pinned state borrows the palette's magenta so a renamed tab is distinguishable from a live
+  OSC title at a glance — <code>theme.palette[13]</code> (<code>#bb9af7</code>), never a new color.
+</p>
+
+<div class="rule"></div>
+
+<h2><span class="n">03</span>The cursor — the one real bug in the set</h2>
+<p class="lede">
+  Today the cursor is a <code>█</code> glyph written <em>over</em> the cell, so the character you are
+  typing on top of disappears. That is not a taste question; it is a fidelity bug. The fix is to draw
+  the block in the background pass and keep the glyph on top — the renderer already has a quad pass
+  and the glyph is shaped independently, so this costs one extra quad per cursor cell.
+</p>
+
+<div class="cursors">
+  <div class="cur-card">
+    <div class="cap"><b>today — glyph replaces the character</b>you cannot read what is under the cursor</div>
+    <div class="big"><span class="cursor glyph"></span><span>ls -la</span></div>
+  </div>
+  <div class="cur-card">
+    <div class="cap"><b>proposal — block behind the glyph</b>the character stays readable</div>
+    <div class="big"><span class="cursor behind">l</span>ls -la</div>
+  </div>
+  <div class="cur-card">
+    <div class="cap"><b>later — underline cursor</b>DECSCUSR 3/4, with the beam for 5/6</div>
+    <div class="big"><span style="border-bottom:2px solid var(--nt-cursor)">l</span>ls -la</div>
+  </div>
+  <div class="cur-card">
+    <div class="cap"><b>later — hollow block</b>DECSCUSR 2, for people who hate solid fills</div>
+    <div class="big"><span class="cursor" style="background:transparent;box-shadow:0 0 0 1px var(--nt-cursor) inset">l</span>ls -la</div>
+  </div>
+</div>
+
+<p class="caption">
+  The two right-hand cells are the cursor-style milestone (DECSCUSR) and are shown for direction only —
+  they are <b>not</b> part of this pass. This pass ships the left pair: the fix, then the styling.
+</p>
+
+<div class="rule"></div>
+
+<h2><span class="n">04</span>What changes, token by token</h2>
+<p class="lede">
+  Nothing here is a new color system. Everything reuses the Tokyo Night pack that already ships.
+</p>
+
+<div class="spec">
+<table>
+  <thead><tr><th style="width:210px">Element</th><th style="width:180px">Token</th><th>Value &amp; rationale</th></tr></thead>
+  <tbody>
+    <tr>
+      <td>Strip background</td>
+      <td><code>theme.background</code></td>
+      <td><span class="sw" style="background:#1a1b26"></span><code>#1a1b26</code> — unchanged. The strip stays seamless with the body.</td>
+    </tr>
+    <tr>
+      <td>Strip separator</td>
+      <td><code>new: tab_bar_border</code></td>
+      <td><span class="sw" style="background:#2b2c3d"></span><code>#2b2c3d</code> — one hairline under the strip. Makes the region legible without adding a band.</td>
+    </tr>
+    <tr>
+      <td>Tab index badge</td>
+      <td><code>new: tab_index_fg</code></td>
+      <td><span class="sw" style="background:#4a5170"></span><code>#4a5170</code> — one step dimmer than the inactive label, so the number never competes with the title.</td>
+    </tr>
+    <tr>
+      <td>Active tab title</td>
+      <td><code>theme.tab_active_fg</code></td>
+      <td><span class="sw" style="background:#7aa2f7"></span><code>#7aa2f7</code> — unchanged, plus the existing 2 px accent underline.</td>
+    </tr>
+    <tr>
+      <td>Inactive tab title</td>
+      <td><code>theme.tab_inactive_fg</code></td>
+      <td><span class="sw" style="background:#565f89"></span><code>#565f89</code> — unchanged.</td>
+    </tr>
+    <tr>
+      <td>Close mark</td>
+      <td><code>theme.tab_close_fg</code></td>
+      <td><span class="sw" style="background:#737aa2"></span><code>#737aa2</code> — hidden at rest, full opacity on hover. <code>×</code> when the font measures it as one cell, else ASCII <code>x</code>.</td>
+    </tr>
+    <tr>
+      <td>Focused pane outline</td>
+      <td><code>new: focus_outline</code></td>
+      <td><span class="sw" style="background:rgba(122,162,247,.38)"></span>accent at 38 % — 1 px inset by 1 px. Unfocused panes recede to 62 %.</td>
+    </tr>
+    <tr>
+      <td>Cursor block</td>
+      <td><code>theme.cursor</code></td>
+      <td><span class="sw" style="background:rgba(192,202,245,.42)"></span>cursor color at 42 % behind the glyph — the character underneath stays readable.</td>
+    </tr>
+    <tr>
+      <td>Toast surface</td>
+      <td><code>theme.tab_active_bg</code></td>
+      <td><span class="sw" style="background:#292e42"></span><code>#292e42</code> — the one reserved field in the theme finally gets a job.</td>
+    </tr>
+    <tr>
+      <td>Timing</td>
+      <td>—</td>
+      <td>hover fade 120 ms · toast in 90 ms / hold 1.1 s / out 260 ms · focus outline instant (no animation on a focus cue).</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<div class="rule"></div>
+
+<h2><span class="n">05</span>The issue list this pass closes</h2>
+
+<div class="issues">
+  <div class="issue fix">
+    <div class="sev">bug</div>
+    <h3>The cursor hides the character under it</h3>
+    <p><b>Today</b> the cursor is a glyph that replaces the cell content. <b>Fix</b> draw the block in
+    the background pass, keep the glyph in the text pass. Same drift-free guarantee, one extra quad.</p>
+  </div>
+  <div class="issue fix">
+    <div class="sev">usability</div>
+    <h3>Focus is nearly invisible in a split</h3>
+    <p><b>Today</b> the only difference is which cursor blinks — gone in a screenshot, easy to miss
+    at speed. <b>Fix</b> outline the focused pane, recede the others.</p>
+  </div>
+  <div class="issue fix">
+    <div class="sev">feedback</div>
+    <h3>Copy and paste happen silently</h3>
+    <p><b>Today</b> <code>Ctrl+Shift+C</code> or a drag-select does something you cannot see.
+    <b>Fix</b> a short toast in the strip: <code>copied · 42 chars</code>.</p>
+  </div>
+  <div class="issue fix">
+    <div class="sev">affordance</div>
+    <h3>No hover state anywhere</h3>
+    <p><b>Today</b> the pointer can sit on a tab with zero feedback. <b>Fix</b> hover reveals the close
+    mark and lifts the label one step. 120 ms, no popovers.</p>
+  </div>
+  <div class="issue">
+    <div class="sev">taste</div>
+    <h3>The tab label reads like a debug string</h3>
+    <p><b>Today</b> <code>[1:bruce@host:~/projects x]</code> — index, colon, brackets, ASCII x.
+    <b>Fix</b> a dim index badge, a clean title, a close mark revealed on hover. The hit targets stay
+    cell-accurate: the label length is still counted in cells, so nothing shifts.</p>
+  </div>
+  <div class="issue">
+    <div class="sev">taste</div>
+    <h3>The strip is not legible as a region</h3>
+    <p><b>Today</b> seamless means the top of the window reads as more text. <b>Fix</b> one hairline
+    under the strip — the cheapest possible separation, and it keeps the Ghostty feel.</p>
+  </div>
+</div>
+
+<p class="caption" style="margin-top:22px">
+  Not in this pass: search UI, scroll position, session restore, window transparency. Those are
+  features, not polish — they belong to the next milestone, not to a UI pass.
+</p>
+
+</body>
+</html>
