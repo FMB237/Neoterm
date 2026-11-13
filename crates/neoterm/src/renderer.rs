@@ -25,6 +25,9 @@ pub struct PaneDraw {
     pub id: PaneId,
     pub rect: CellRect,
     pub rows: Vec<RowContent>,
+    /// Cursor cell as (viewport row, grid column). The renderer draws the
+    /// block here, behind the glyph, so the character stays readable.
+    pub cursor: Option<(usize, usize)>,
 }
 
 /// Viewport scroll state driving the scrollbar (built per frame in main).
@@ -119,6 +122,8 @@ pub struct Renderer {
     font_size: f32,
     /// Resolved font family; `None` = cosmic-text's generic `Monospace`.
     font_family: Option<String>,
+    /// Cursor block color (0..1 RGB, linear).
+    cursor_rgb: [f32; 3],
     /// Theme quad colors (0..1 RGB): selection, scrollbar, tab strip,
     /// active-tab accent.
     sel_bg: [f32; 3],
@@ -257,6 +262,7 @@ impl Renderer {
             fg: cfg.fg_glyphon(),
             font_size,
             font_family,
+            cursor_rgb: cursor_color(cfg),
             sel_bg: cfg.theme.selection_quad(),
             track_bg: cfg.theme.scrollbar_track_quad(),
             thumb_bg: cfg.theme.scrollbar_thumb_quad(),
@@ -293,6 +299,7 @@ impl Renderer {
         self.bg = cfg.bg_wgpu();
         self.flash_bg = flash_color(cfg);
         self.fg = cfg.fg_glyphon();
+        self.cursor_rgb = cursor_color(cfg);
         self.sel_bg = cfg.theme.selection_quad();
         self.track_bg = cfg.theme.scrollbar_track_quad();
         self.thumb_bg = cfg.theme.scrollbar_thumb_quad();
@@ -673,6 +680,22 @@ impl Renderer {
         for pane in panes {
             let ox = body_left + pane.rect.col as f32 * cell_w;
             let oy = body_top + pane.rect.row as f32 * line_h;
+            // Cursor block: drawn before the text, so the glyph sits on top
+            // of it (inverse video) and stays readable.
+            if let Some((row, col)) = pane.cursor {
+                let x0 = ox + col as f32 * cell_w;
+                let y0 = oy + row as f32 * line_h;
+                push_quad(
+                    &mut bg_verts,
+                    x0,
+                    y0,
+                    x0 + cell_w,
+                    y0 + line_h,
+                    w as f32,
+                    h as f32,
+                    with_alpha(self.cursor_rgb, 1.0),
+                );
+            }
             for (i, row) in pane.rows.iter().enumerate() {
                 let y0 = oy + i as f32 * line_h;
                 let y1 = y0 + line_h;
@@ -969,6 +992,16 @@ fn flash_color(cfg: &NeotermConfig) -> wgpu::Color {
         b: mix(bg.b, b),
         a: 1.0,
     }
+}
+
+/// Cursor block color in linear RGB (the swapchain is an sRGB target).
+fn cursor_color(cfg: &NeotermConfig) -> [f32; 3] {
+    let (r, g, b) = cfg.theme.cursor_rgb();
+    [
+        NeotermConfig::srgb8_to_linear(r),
+        NeotermConfig::srgb8_to_linear(g),
+        NeotermConfig::srgb8_to_linear(b),
+    ]
 }
 
 /// Append a solid-color quad (two triangles) in NDC coordinates.

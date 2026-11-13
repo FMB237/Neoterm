@@ -1399,7 +1399,8 @@ impl ApplicationHandler for App {
                     (self.renderer.as_mut(), self.tabs.as_ref())
                 {
                     // All panes of the ACTIVE tab (inactive tabs don't draw).
-                    // Cursor blinks only in the focused pane.
+                    // The focused pane blinks its cursor; unfocused panes
+                    // show a steady one so the prompt stays locatable.
                     let fg = self.cfg.fg_rgb();
                     let bg = self.cfg.bg_rgb();
                     let blink = self.blink_on;
@@ -1410,9 +1411,14 @@ impl ApplicationHandler for App {
                         let focus = tab.active_id();
                         for (id, rect) in layout.panes {
                             if let Some(pane) = tab.pane(id) {
-                                let (rows, _) =
-                                    pane.rendered_rows(fg, bg, blink && id == focus);
-                                panes.push(PaneDraw { id, rect, rows });
+                                let cursor_on = if id == focus { blink } else { true };
+                                let (rows, cursor) = pane.rendered_rows(fg, bg, cursor_on);
+                                panes.push(PaneDraw {
+                                    id,
+                                    rect,
+                                    rows,
+                                    cursor,
+                                });
                             }
                         }
                         divs = layout

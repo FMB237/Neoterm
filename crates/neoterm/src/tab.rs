@@ -145,10 +145,9 @@ pub struct Pane {
     /// Set when the app rang the bell (BEL). Drained by the main loop,
     /// which turns it into a visual flash.
     pub bell: Arc<AtomicBool>,
-    /// Theme ANSI palette (16 entries) + cursor color, applied to named
-    /// colors at resolve time. Refreshed on config reload.
+    /// Theme ANSI palette (16 entries), applied to named colors at resolve
+    /// time. Refreshed on config reload.
     palette: [(u8, u8, u8); 16],
-    cursor_rgb: (u8, u8, u8),
     /// Last cursor position seen by `take_damage` (stale-cursor detection:
     /// cursor-only moves don't always mark grid damage).
     last_cursor: Mutex<(usize, usize)>,
@@ -253,7 +252,6 @@ impl Pane {
             dead,
             bell,
             palette: cfg.theme.palette_rgb(),
-            cursor_rgb: cfg.theme.cursor_rgb(),
             last_cursor: Mutex::new((0, 0)),
         })
     }
@@ -261,7 +259,6 @@ impl Pane {
     /// Refresh theme colors after a config reload (no respawn needed).
     pub fn apply_config(&mut self, cfg: &NeotermConfig) {
         self.palette = cfg.theme.palette_rgb();
-        self.cursor_rgb = cfg.theme.cursor_rgb();
     }
 
     /// Live tab title: OSC 0/2 name from the running app, else `tab-{id}`.
@@ -464,18 +461,18 @@ impl Pane {
     /// columns). Trailing blank cells are trimmed: invisible anyway since the
     /// Stage 1 renderer draws no per-cell backgrounds.
     ///
-    /// When `cursor_visible`, the cursor cell is replaced with `█` (FULL
-    /// BLOCK) keeping the cell's own fg color, so the text shaper positions
-    /// it exactly with zero drift. Column-to-char mapping is approximate when
-    /// a row contains wide chars.
+    /// When `cursor_visible`, the cursor cell is returned as
+    /// `(viewport row, grid column)` and its glyph is recolored to the
+    /// background color; the renderer draws the block behind it. The
+    /// character under the cursor therefore stays readable.
     pub fn rendered_rows(
         &self,
         default_fg: (u8, u8, u8),
         default_bg: (u8, u8, u8),
         cursor_visible: bool,
-    ) -> (Vec<RowContent>, (usize, usize)) {
+    ) -> (Vec<RowContent>, Option<(usize, usize)>) {
         let Ok(term) = self.term.lock() else {
-            return (vec![], (0, 0));
+            return (vec![], None);
         };
         render_term_rows(
             &term,
@@ -483,7 +480,6 @@ impl Pane {
             default_bg,
             cursor_visible,
             &self.palette,
-            self.cursor_rgb,
         )
     }
 }
@@ -1237,14 +1233,18 @@ pub fn resolve_title(pinned: Option<&str>, live: &str) -> String {
 ///
 /// Free function (takes an already-locked `Term`) so headless tests can
 /// drive a `Term` directly without PTY, event loop, or window.
+///
+/// The cursor is **not** baked into the text: the caller gets its cell back
+/// and the renderer draws a block *behind* the glyph, so the character under
+/// the cursor stays readable. The glyph itself is recolored to the
+/// background color (inverse video) — the classic terminal cursor.
 pub fn render_term_rows(
     term: &Term<TitleListener>,
     default_fg: (u8, u8, u8),
     default_bg: (u8, u8, u8),
     cursor_visible: bool,
     palette: &[(u8, u8, u8); 16],
-    cursor_rgb: (u8, u8, u8),
-) -> (Vec<RowContent>, (usize, usize)) {
+) -> (Vec<RowContent>, Option<(usize, usize)>) {
         let cols = term.columns();
         let rows = term.screen_lines();
         let colors = term.colors();
@@ -1259,13 +1259,17 @@ pub fn render_term_rows(
             term.selection.as_ref().and_then(|s| s.to_range(&*term));
 
         let cpoint = grid.cursor.point;
-        let cursor = (
-            (cpoint.line.0.max(0) as usize).min(rows.saturating_sub(1)),
-            cpoint.column.0.min(cols.saturating_sub(1)),
-        );
         // Cursor in viewport-row coordinates; off-screen while scrolled.
         let cursor_vrow = cpoint.line.0 + offset;
         let cursor_col = cpoint.column.0.min(cols.saturating_sub(1));
+        // The cursor cell the renderer draws its block in: (viewport row,
+        // grid column). `None` when the cursor is hidden or scrolled away.
+        let cursor_cell: Option<(usize, usize)> =
+            if cursor_visible && cursor_vrow >= 0 && (cursor_vrow as usize) < rows {
+                Some((cursor_vrow as usize, cursor_col))
+            } else {
+                None
+            };
 
         let mut out = Vec::with_capacity(rows);
         for row_idx in 0..rows {
@@ -1354,32 +1358,14 @@ pub fn render_term_rows(
             {
                 cells.pop();
             }
-            // Bake the block cursor (skipped when scrolled out of view).
+            // The cursor is drawn by the renderer as a block *behind* the
+            // glyph, so the character underneath stays readable. Only the
+            // glyph's color changes here (inverse video): the block itself
+            // is a quad in the renderer's background pass.
             if cursor_visible && cursor_vrow == row_idx as i32 {
-                let placed = match cursor_char {
-                    Some(idx) if idx < cells.len() => {
-                        cells[idx].0 = '█';
-                        cells[idx].1.fg = cursor_rgb;
-                        true
-                    }
-                    _ => false,
-                };
-                if !placed {
-                    while cells.len() <= cursor_col {
-                        cells.push((
-                            ' ',
-                            CellStyle {
-                                fg: default_fg,
-                                bg: default_bg,
-                                bold: false,
-                                italic: false,
-                            },
-                        ));
-                    }
-                    let idx = cursor_col.min(cells.len().saturating_sub(1));
+                if let Some(idx) = cursor_char {
                     if let Some(slot) = cells.get_mut(idx) {
-                        slot.0 = '█';
-                        slot.1.fg = cursor_rgb;
+                        slot.1.fg = default_bg;
                     }
                 }
             }
@@ -1406,7 +1392,7 @@ pub fn render_term_rows(
                 bg_rects,
             });
         }
-        (out, cursor)
+        (out, cursor_cell)
     }
 
 // Note: `impl Pane` ends at `rendered_rows` above; `render_term_rows` is a
@@ -1613,7 +1599,7 @@ mod tests {
         feed(&mut term, "line-49");
 
         // Live view shows the last 10 content lines.
-        let (rows, _) = render_term_rows(&term, WHITE, BLACK, false, &XTERM_BASE, WHITE);
+        let (rows, _) = render_term_rows(&term, WHITE, BLACK, false, &XTERM_BASE);
         assert_eq!(rows.len(), 10);
         assert_eq!(rows[0].text, "line-40");
         assert_eq!(rows[9].text, "line-49");
@@ -1621,7 +1607,7 @@ mod tests {
         // Scroll up 5: viewport shows older history, top-first.
         term.scroll_display(Scroll::Delta(5));
         assert_eq!(term.grid().display_offset(), 5);
-        let (rows, _) = render_term_rows(&term, WHITE, BLACK, false, &XTERM_BASE, WHITE);
+        let (rows, _) = render_term_rows(&term, WHITE, BLACK, false, &XTERM_BASE);
         assert_eq!(rows.len(), 10);
         for r in &rows {
             println!("|{}|", r.text);
@@ -1632,7 +1618,7 @@ mod tests {
         // Back to bottom restores the live view.
         term.scroll_display(Scroll::Bottom);
         assert_eq!(term.grid().display_offset(), 0);
-        let (rows, _) = render_term_rows(&term, WHITE, BLACK, false, &XTERM_BASE, WHITE);
+        let (rows, _) = render_term_rows(&term, WHITE, BLACK, false, &XTERM_BASE);
         assert_eq!(rows[0].text, "line-40");
         assert_eq!(rows[9].text, "line-49");
     }
@@ -1654,7 +1640,7 @@ mod tests {
             .unwrap()
             .update(Point::new(Line(0), Column(4)), Side::Right);
 
-        let (rows, _) = render_term_rows(&term, WHITE, BLACK, false, &XTERM_BASE, WHITE);
+        let (rows, _) = render_term_rows(&term, WHITE, BLACK, false, &XTERM_BASE);
         assert_eq!(rows[0].text, "hello world");
         assert_eq!(rows[0].sel_cols, Some((0, 4)));
         assert_eq!(rows[1].sel_cols, None);
@@ -1670,7 +1656,7 @@ mod tests {
         // Inverse video on defaults: bg becomes light, fg dark.
         feed(&mut term, "\r\n\x1b[7mrev\x1b[0m");
 
-        let (rows, _) = render_term_rows(&term, WHITE, BLACK, false, &XTERM_BASE, WHITE);
+        let (rows, _) = render_term_rows(&term, WHITE, BLACK, false, &XTERM_BASE);
         assert_eq!(rows[0].text, "hi ok");
         assert_eq!(rows[0].bg_rects, vec![(0, 1, (0, 0, 238))]);
         assert_eq!(rows[1].text, "rev");
@@ -1716,6 +1702,29 @@ mod tests {
         assert!(dirty.load(Ordering::Relaxed));
     }
 
+    /// The cursor is a block drawn *behind* the glyph: the character under
+    /// it survives (it is only recolored to the background color).
+    #[test]
+    fn cursor_keeps_the_character_underneath() {
+        let size = TermSize { cols: 20, rows: 10 };
+        let mut term = Term::new(TermConfig::default(), &size, TitleListener::headless("tab-0").0);
+        // "abc" then backspace: the cursor sits on the 'c'.
+        feed(&mut term, "abc\x08");
+
+        let (rows, cursor) = render_term_rows(&term, WHITE, BLACK, true, &XTERM_BASE);
+        assert_eq!(cursor, Some((0, 2)));
+        // The character is still there (no block glyph substituted).
+        assert_eq!(rows[0].text, "abc");
+        // ...and it is recolored to the background (inverse video), so the
+        // renderer can draw the block behind it.
+        let last = rows[0].spans.last().expect("spans");
+        assert_eq!(last.1.fg, BLACK);
+
+        // A hidden cursor reports no cell at all.
+        let (_, cursor) = render_term_rows(&term, WHITE, BLACK, false, &XTERM_BASE);
+        assert_eq!(cursor, None);
+    }
+
     /// Named colors resolve through the theme palette, not the xterm table.
     #[test]
     fn theme_palette_overrides_named_colors() {
@@ -1725,7 +1734,7 @@ mod tests {
         let palette = Theme::default().palette_rgb();
         // Tokyo Night red, not xterm red.
         assert_eq!(palette[1], (247, 118, 142));
-        let (rows, _) = render_term_rows(&term, WHITE, BLACK, false, &palette, WHITE);
+        let (rows, _) = render_term_rows(&term, WHITE, BLACK, false, &palette);
         assert_eq!(rows[0].text, "red idx");
         // SGR 31 and 38;5;1 agree (named + indexed paths).
         assert_eq!(rows[0].spans[0].1.fg, (247, 118, 142));
