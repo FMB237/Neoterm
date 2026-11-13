@@ -31,6 +31,10 @@ pub struct Theme {
     pub tab_active_bg: String,
     /// Reserved: kept for file compat, unused by the seamless strip.
     pub tab_accent: String,
+    /// Hairline under the tab strip (separates it from the body).
+    pub tab_bar_border: String,
+    /// Color of the dim tab index badge.
+    pub tab_index_fg: String,
     pub tab_inactive_fg: String,
     pub tab_close_fg: String,
     pub scrollbar_track: String,
@@ -71,6 +75,8 @@ impl Default for Theme {
             tab_active_fg: s("#7aa2f7"),
             tab_active_bg: s("#292e42"),
             tab_accent: s("#7aa2f7"),
+            tab_bar_border: s("#2b2c3d"),
+            tab_index_fg: s("#4a5170"),
             tab_inactive_fg: s("#565f89"),
             tab_close_fg: s("#737aa2"),
             scrollbar_track: s("#16161e"),
@@ -113,6 +119,8 @@ impl Theme {
                 t.tab_active_fg = s("#89b4fa");
                 t.tab_active_bg = s("#313244");
                 t.tab_accent = s("#89b4fa");
+                t.tab_bar_border = s("#313244");
+                t.tab_index_fg = s("#585b70");
                 t.tab_inactive_fg = s("#6c7086");
                 t.tab_close_fg = s("#7f849c");
                 t.scrollbar_track = s("#181825");
@@ -145,6 +153,8 @@ impl Theme {
                 t.tab_active_fg = s("#bd93f9");
                 t.tab_active_bg = s("#44475a");
                 t.tab_accent = s("#bd93f9");
+                t.tab_bar_border = s("#45415a");
+                t.tab_index_fg = s("#665c6e");
                 t.tab_inactive_fg = s("#6272a4");
                 t.tab_close_fg = s("#6272a4");
                 t.scrollbar_track = s("#21222c");
@@ -177,6 +187,8 @@ impl Theme {
                 t.tab_active_fg = s("#fabd2f");
                 t.tab_active_bg = s("#3c3836");
                 t.tab_accent = s("#fabd2f");
+                t.tab_bar_border = s("#3b3527");
+                t.tab_index_fg = s("#6b6353");
                 t.tab_inactive_fg = s("#928374");
                 t.tab_close_fg = s("#928374");
                 t.scrollbar_track = s("#1d2021");
@@ -252,6 +264,21 @@ impl Theme {
 
     pub fn tab_close_fg_glyphon(&self) -> glyphon::Color {
         Self::glyphon_color(&self.tab_close_fg)
+    }
+
+    /// Hairline under the tab strip.
+    pub fn tab_bar_border_quad(&self) -> [f32; 3] {
+        Self::quad_f32(&self.tab_bar_border)
+    }
+
+    /// The dim index badge color.
+    pub fn tab_index_fg_glyphon(&self) -> glyphon::Color {
+        Self::glyphon_color(&self.tab_index_fg)
+    }
+
+    /// Body background as a glyph color (used to hide the close mark).
+    pub fn bg_glyphon(&self) -> glyphon::Color {
+        Self::glyphon_color(&self.background)
     }
 }
 

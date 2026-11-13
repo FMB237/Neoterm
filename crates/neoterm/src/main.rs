@@ -512,6 +512,27 @@ impl App {
         titles
     }
 
+    /// The tab the pointer is over, if it is in the strip band. The hovered
+    /// tab reveals its close mark.
+    fn hovered_tab(&self) -> Option<usize> {
+        if !self.strip_on() {
+            return None;
+        }
+        let pos = self.cursor_pos?;
+        let window = self.window.as_ref()?;
+        let renderer = self.renderer.as_ref()?;
+        let tabs = self.tabs.as_ref()?;
+        let scale = window.scale_factor() as f32;
+        let g = renderer.body_geometry(scale, true);
+        if pos.y as f32 >= g.3 {
+            return None;
+        }
+        let titles = tabs.titles();
+        let adv = g.0 / scale.max(f32::EPSILON);
+        let regions = mouse::tab_regions(&titles, adv, renderer::TAB_LEFT * scale, scale);
+        mouse::tab_hit(&regions, pos.x as f32)
+    }
+
     /// Resolve physical-pixel coordinates to the pane under the cursor:
     /// (pane id, pane-local col, pane-local viewport row, half). None on
     /// dividers, the tab strip, or outside all panes. Coordinates are
@@ -623,7 +644,7 @@ impl App {
             }
             let titles = self.tab_titles();
             let adv = g.0 / scale.max(f32::EPSILON);
-            let regions = mouse::tab_regions(&titles, tabs.active_index(), adv, renderer::TAB_LEFT * scale, scale);
+            let regions = mouse::tab_regions(&titles, adv, renderer::TAB_LEFT * scale, scale);
             mouse::tab_hit(&regions, pos.x as f32)
         })();
         if self.strip_on() {
@@ -639,7 +660,7 @@ impl App {
                 }
                 let titles = self.tab_titles();
                 let adv = g.0 / scale.max(f32::EPSILON);
-                mouse::tab_new_hit(&titles, tabs.active_index(), adv, renderer::TAB_LEFT * scale, scale, pos.x as f32)
+                mouse::tab_new_hit(&titles, adv, renderer::TAB_LEFT * scale, scale, pos.x as f32)
                     .then_some(())
             })();
             if new_tab.is_some() {
@@ -663,7 +684,6 @@ impl App {
                 let adv = g.0 / scale.max(f32::EPSILON);
                 mouse::tab_close_hit(
                     &titles,
-                    tabs.active_index(),
                     adv,
                     renderer::TAB_LEFT * scale,
                     scale,
@@ -885,7 +905,7 @@ impl App {
             let titles = self.tab_titles();
             let adv = g.0 / scale.max(f32::EPSILON);
             let regions =
-                mouse::tab_regions(&titles, tabs.active_index(), adv, renderer::TAB_LEFT * scale, scale);
+                mouse::tab_regions(&titles, adv, renderer::TAB_LEFT * scale, scale);
             mouse::tab_hit(&regions, pos.x as f32)
         })();
         if let Some(i) = tab_click {
@@ -966,7 +986,14 @@ impl App {
     }
 
     fn on_cursor_moved(&mut self, pos: PhysicalPosition<f64>) {
+        // A hover change re-styles the tab strip (the close mark appears),
+        // so it needs a redraw of its own.
+        let hover_before = self.hovered_tab();
         self.cursor_pos = Some(pos);
+        if self.hovered_tab() != hover_before {
+            self.force_draw = true;
+            self.request_redraw();
+        }
         // Divider drag: ratio from the pointer, clamped to livable panes.
         // resize_body only touches panes whose grid size changed.
         if let Some(drag) = self.split_drag.as_ref() {
@@ -1379,6 +1406,7 @@ impl ApplicationHandler for App {
                 };
                 let titles = self.tab_titles();
                 let active = tabs.active_index();
+                let hover = self.hovered_tab();
                 let blink = self.blink_on;
                 let strip = self.strip_on();
                 // Drain reader wakeups + damage; skip the whole present when
@@ -1452,7 +1480,15 @@ impl ApplicationHandler for App {
                         .map(|until| Instant::now() < until)
                         .unwrap_or(false);
                     r.set_flash(flash);
-                    r.draw(&titles, t.active_index(), &panes, &divs, scroll, strip);
+                    r.draw(
+                        &titles,
+                        t.active_index(),
+                        hover,
+                        &panes,
+                        &divs,
+                        scroll,
+                        strip,
+                    );
                 }
                 self.last_titles = titles;
                 self.last_active = active;

@@ -136,12 +136,19 @@ pub struct Renderer {
     thumb_bg: [f32; 3],
     strip_bg: [f32; 3],
     tab_accent: [f32; 3],
-    /// Tab-strip text colors: active / inactive / close mark.
+    /// Tab-strip text colors: active / inactive / close mark / index badge.
     tab_active_fg: Color,
     tab_inactive_fg: Color,
     tab_close_fg: Color,
+    tab_index_fg: Color,
+    /// Body background as a glyph color (hides the close mark at rest).
+    bg_glyph: Color,
+    /// Hairline under the tab strip.
+    tab_bar_border: [f32; 3],
     // Perf gate: skip cosmic-text shaping when content is unchanged.
     last_tab_text: String,
+    /// Hovered tab (the close mark is revealed on it).
+    last_hover: Option<usize>,
     /// Measured monospace advance in layout units (None until a non-empty
     /// row has been shaped; falls back to the 0.62 heuristic).
     measured_advance: Option<f32>,
@@ -277,7 +284,11 @@ impl Renderer {
             tab_active_fg: cfg.theme.tab_active_fg_glyphon(),
             tab_inactive_fg: cfg.theme.tab_inactive_fg_glyphon(),
             tab_close_fg: cfg.theme.tab_close_fg_glyphon(),
+            tab_index_fg: cfg.theme.tab_index_fg_glyphon(),
+            bg_glyph: cfg.theme.bg_glyphon(),
+            tab_bar_border: cfg.theme.tab_bar_border_quad(),
             last_tab_text: String::new(),
+            last_hover: None,
             measured_advance: None,
             bg_pipeline,
             bg_buffer,
@@ -315,6 +326,9 @@ impl Renderer {
         self.tab_active_fg = cfg.theme.tab_active_fg_glyphon();
         self.tab_inactive_fg = cfg.theme.tab_inactive_fg_glyphon();
         self.tab_close_fg = cfg.theme.tab_close_fg_glyphon();
+        self.tab_index_fg = cfg.theme.tab_index_fg_glyphon();
+        self.bg_glyph = cfg.theme.bg_glyphon();
+        self.tab_bar_border = cfg.theme.tab_bar_border_quad();
         // Family is resolved against the installed fonts; a missing family
         // falls back to generic monospace instead of a proportional face.
         let family = resolve_family(&mut self.font_system, &cfg.font_family);
@@ -470,6 +484,7 @@ impl Renderer {
         &mut self,
         titles: &[String],
         active: usize,
+        hover: Option<usize>,
         panes: &[PaneDraw],
         dividers: &[CellRect],
         scroll: ScrollState,
@@ -494,29 +509,37 @@ impl Renderer {
             Some(name) => Family::Name(name),
             None => Family::Monospace,
         };
-        let mut tab_text = mouse::tab_bar_text(titles, active);
+        let mut tab_text = mouse::tab_bar_text(titles);
         if tab_text.is_empty() {
             tab_text = " NeoTerm ".to_string();
         }
-        if tab_text != self.last_tab_text {
-            let (active_range, x_ranges, plus_range) = mouse::tab_span_ranges(titles, active);
+        // The hover state is part of the cache key: it changes the styling
+        // of the close marks, so the strip is re-shaped when it changes.
+        if tab_text != self.last_tab_text || hover != self.last_hover {
+            let spans_info = mouse::tab_spans(titles);
+            let active_range = mouse::active_title_range(titles, active);
             let base = Attrs::new().family(family).color(self.tab_inactive_fg);
             let active_attrs = Attrs::new()
                 .family(family)
                 .color(self.tab_active_fg)
                 .weight(Weight::BOLD);
             let close_attrs = Attrs::new().family(family).color(self.tab_close_fg);
+            // The close mark is invisible until its tab is hovered: it is
+            // drawn in the background color, but the cell is always there,
+            // so the hit target never moves.
+            let hidden_attrs = Attrs::new().family(family).color(self.bg_glyph);
+            let index_attrs = Attrs::new().family(family).color(self.tab_index_fg);
             // Partition the text at every span edge; each piece takes the
-            // innermost style (close mark wins inside the active segment).
+            // innermost style (close mark, then index badge, then active).
             let mut cuts = vec![
                 0,
                 tab_text.len(),
                 active_range.start,
                 active_range.end,
-                plus_range.start,
-                plus_range.end,
+                spans_info.plus.start,
+                spans_info.plus.end,
             ];
-            for xr in &x_ranges {
+            for xr in spans_info.indices.iter().chain(spans_info.closes.iter()) {
                 cuts.push(xr.start);
                 cuts.push(xr.end);
             }
@@ -533,12 +556,26 @@ impl Renderer {
                     let in_active = active_range.start < active_range.end
                         && a >= active_range.start
                         && b <= active_range.end;
-                    let is_x = x_ranges.iter().any(|xr| a >= xr.start && b <= xr.end);
-                    let is_plus = plus_range.start < plus_range.end
-                        && a >= plus_range.start
-                        && b <= plus_range.end;
-                    let attrs = if is_x || is_plus {
+                    let is_plus = spans_info.plus.start < spans_info.plus.end
+                        && a >= spans_info.plus.start
+                        && b <= spans_info.plus.end;
+                    let close_idx = spans_info.closes.iter().position(|xr| {
+                        xr.start <= a && b <= xr.end
+                    });
+                    let is_index = spans_info
+                        .indices
+                        .iter()
+                        .any(|xr| xr.start <= a && b <= xr.end);
+                    let attrs = if is_plus {
                         close_attrs.clone()
+                    } else if let Some(i) = close_idx {
+                        if Some(i) == hover {
+                            close_attrs.clone()
+                        } else {
+                            hidden_attrs.clone()
+                        }
+                    } else if is_index {
+                        index_attrs.clone()
                     } else if in_active {
                         active_attrs.clone()
                     } else {
@@ -550,6 +587,7 @@ impl Renderer {
             self.tab_buffer.set_rich_text(spans, &base, Shaping::Advanced, None);
             self.tab_buffer.shape_until_scroll(&mut self.font_system, false);
             self.last_tab_text = tab_text;
+            self.last_hover = hover;
         }
 
         // Per-pane row buffers: reshape only rows whose content changed
@@ -637,9 +675,22 @@ impl Renderer {
                 h as f32,
                 with_alpha(self.strip_bg, 1.0),
             );
+            // One hairline makes the strip a legible region without
+            // adding a band.
+            let hair = scale.max(1.0);
+            push_quad(
+                &mut bg_verts,
+                0.0,
+                body_top - hair,
+                w as f32,
+                body_top,
+                w as f32,
+                h as f32,
+                with_alpha(self.tab_bar_border, 1.0),
+            );
             // Accent underline under the active tab (theme `tab_accent`).
             if !titles.is_empty() && active < titles.len() {
-                let regions = mouse::tab_regions(titles, active, self.advance(), tab_left, scale);
+                let regions = mouse::tab_regions(titles, self.advance(), tab_left, scale);
                 if let Some(&(x0, x1)) = regions.get(active) {
                     let inset = 6.0 * scale;
                     push_quad(

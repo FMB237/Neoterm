@@ -67,28 +67,95 @@ pub const BTN_MIDDLE: u8 = 1;
 
 /// One tab-bar segment label. Single source of truth shared by the renderer
 /// (drawing) and hit-testing, so clicks always land on what is drawn.
-/// ASCII `x` (not ×): hit-test math counts 1 cell per char, and a
-/// fallback-font × can render wider and drift every target right of it.
-pub fn tab_label(index: usize, title: &str, is_active: bool) -> String {
-    if is_active {
-        format!(" [{}:{} x] ", index + 1, title)
-    } else {
-        format!("  {}:{} x  ", index + 1, title)
-    }
+///
+/// The layout is uniform for every tab: index badge, two spaces, title, a
+/// close mark and a trailing space. The active tab is distinguished by
+/// color and the accent underline, not by a different shape.
+///
+/// The close mark is ASCII `x`, not `×`: hit-test math counts one cell per
+/// char, and a fallback font can render `×` wider than a cell, which would
+/// push every target to its right out of alignment. The mark is drawn in
+/// the background color until the tab is hovered, so it is invisible at
+/// rest but its cell is always there.
+pub fn tab_label(index: usize, title: &str) -> String {
+    format!(" {}  {} x ", index + 1, title)
 }
 
 /// Full tab-bar text (joined segment labels plus a `+` new-tab mark).
-pub fn tab_bar_text(titles: &[String], active: usize) -> String {
+pub fn tab_bar_text(titles: &[String]) -> String {
     if titles.is_empty() {
         return " NeoTerm ".to_string();
     }
     let mut bar: String = titles
         .iter()
         .enumerate()
-        .map(|(i, t)| tab_label(i, t, i == active))
+        .map(|(i, t)| tab_label(i, t))
         .collect();
     bar.push_str("  +");
     bar
+}
+
+/// Styling spans over the joined strip text.
+///
+/// Byte ranges, so they can be cut into styled pieces for the text buffer.
+/// The renderer resolves overlapping ranges by precedence: close mark, then
+/// index badge, then the active segment.
+#[derive(Clone, Debug, Default)]
+pub struct TabSpans {
+    /// Byte range of the active tab's title.
+    pub active: Range<usize>,
+    /// Byte range of each tab's index badge.
+    pub indices: Vec<Range<usize>>,
+    /// Byte range of each tab's close mark.
+    pub closes: Vec<Range<usize>>,
+    /// Byte range of the trailing `+` new-tab mark.
+    pub plus: Range<usize>,
+}
+
+/// Compute the styling spans for the joined strip text.
+pub fn tab_spans(titles: &[String]) -> TabSpans {
+    let mut spans = TabSpans {
+        indices: Vec::with_capacity(titles.len()),
+        closes: Vec::with_capacity(titles.len()),
+        ..Default::default()
+    };
+    let mut off = 0;
+    for (i, t) in titles.iter().enumerate() {
+        let label = tab_label(i, t);
+        // Index badge: " N  ".
+        let index_end = label.find("  ").map(|p| p + 2).unwrap_or(0);
+        spans.indices.push(off..off + index_end);
+        // Close mark: the "x" two characters before the end (" x ").
+        let len = label.len();
+        let close_start = off + len - 2;
+        spans.closes.push(close_start..close_start + 1);
+        off += len;
+    }
+    // The active segment is the one whose title is highlighted; the caller
+    // resolves the active title range as "everything except the index and
+    // the close mark", so it is computed here for the active tab only.
+    spans.plus = if titles.is_empty() {
+        0..0
+    } else {
+        off..off + 3
+    };
+    spans
+}
+
+/// Byte range of the active tab's title (between its index badge and its
+/// close mark).
+pub fn active_title_range(titles: &[String], active: usize) -> Range<usize> {
+    let mut off = 0;
+    for (i, t) in titles.iter().enumerate() {
+        let label = tab_label(i, t);
+        if i == active {
+            let index_end = label.find("  ").map(|p| p + 2).unwrap_or(0);
+            let len = label.len();
+            return (off + index_end)..(off + len - 3);
+        }
+        off += label.len();
+    }
+    0..0
 }
 
 /// Strip visibility (Ghostty `window-show-tab-bar` language): `auto`
@@ -107,7 +174,6 @@ pub fn strip_visible(tab_count: usize, mode: &str) -> bool {
 /// width is `advance * scale`); `left` is the bar's physical left edge.
 pub fn tab_regions(
     titles: &[String],
-    active: usize,
     advance: f32,
     left: f32,
     scale: f32,
@@ -115,7 +181,7 @@ pub fn tab_regions(
     let mut out = Vec::with_capacity(titles.len());
     let mut x = left;
     for (i, t) in titles.iter().enumerate() {
-        let w = tab_label(i, t, i == active).chars().count() as f32 * advance * scale;
+        let w = tab_label(i, t).chars().count() as f32 * advance * scale;
         out.push((x, x + w));
         x += w;
     }
@@ -135,7 +201,6 @@ pub fn tab_hit(regions: &[(f32, f32)], x: f32) -> Option<usize> {
 /// `tab_regions` so it cannot drift from what is drawn.
 pub fn tab_close_hit(
     titles: &[String],
-    active: usize,
     advance: f32,
     left: f32,
     scale: f32,
@@ -144,7 +209,7 @@ pub fn tab_close_hit(
     let cell = advance * scale;
     let mut seg_x = left;
     for (i, t) in titles.iter().enumerate() {
-        let n = tab_label(i, t, i == active).chars().count() as f32;
+        let n = tab_label(i, t).chars().count() as f32;
         let close_x0 = seg_x + (n - 3.0) * cell;
         let seg_x1 = seg_x + n * cell;
         if x >= close_x0 && x < seg_x1 {
@@ -155,42 +220,10 @@ pub fn tab_close_hit(
     None
 }
 
-/// Byte ranges over the joined `tab_bar_text` for styling: the active
-/// segment's full range, every segment's close-mark (`x`) range, and the
-/// trailing `+` new-tab mark range (empty when there are no tabs).
-/// The `x` is always the third-to-last byte of its label (ASCII suffix),
-/// so ranges stay on char boundaries for any title.
-pub fn tab_span_ranges(
-    titles: &[String],
-    active: usize,
-) -> (Range<usize>, Vec<Range<usize>>, Range<usize>) {
-    let mut active_range = 0..0;
-    let mut xs = Vec::with_capacity(titles.len());
-    let mut off = 0;
-    for (i, t) in titles.iter().enumerate() {
-        let label = tab_label(i, t, i == active);
-        let end = off + label.len();
-        if i == active {
-            active_range = off..end;
-        }
-        let x = end - 3;
-        xs.push(x..x + 1);
-        off = end;
-    }
-    // Trailing "  +" mark (3 bytes) when tabs exist.
-    let plus = if titles.is_empty() {
-        0..0
-    } else {
-        off..off + 3
-    };
-    (active_range, xs, plus)
-}
-
 /// Whether physical x hits the `+` new-tab mark: the 3 cells directly
 /// past the last tab segment.
 pub fn tab_new_hit(
     titles: &[String],
-    active: usize,
     advance: f32,
     left: f32,
     scale: f32,
@@ -202,7 +235,7 @@ pub fn tab_new_hit(
     let cell = advance * scale;
     let mut end = left;
     for (i, t) in titles.iter().enumerate() {
-        end += tab_label(i, t, i == active).chars().count() as f32 * cell;
+        end += tab_label(i, t).chars().count() as f32 * cell;
     }
     x >= end && x < end + 3.0 * cell
 }
@@ -370,7 +403,7 @@ mod tests {
     #[test]
     fn tab_regions_contiguous_and_hittable() {
         let titles = vec!["tab-1".to_string(), "tab-2".to_string()];
-        let regions = tab_regions(&titles, 0, 9.0, 8.0, 1.0);
+        let regions = tab_regions(&titles, 9.0, 8.0, 1.0);
         assert_eq!(regions.len(), 2);
         // Contiguous: each segment starts where the previous ended.
         assert!((regions[1].0 - regions[0].1).abs() < 0.01);
@@ -379,57 +412,58 @@ mod tests {
         assert_eq!(tab_hit(&regions, 0.0), None);
         assert_eq!(tab_hit(&regions, regions[1].1 + 100.0), None);
         // Labels match what the renderer draws.
-        assert_eq!(tab_label(0, "tab-1", true), " [1:tab-1 x] ");
-        assert_eq!(tab_label(1, "tab-2", false), "  2:tab-2 x  ");
+        assert_eq!(tab_label(0, "tab-1"), " 1  tab-1 x ");
+        assert_eq!(tab_label(1, "tab-2"), " 2  tab-2 x ");
     }
 
     #[test]
     fn tab_close_zone_tracks_label_end() {
         let titles = vec!["tab-1".to_string(), "tab-2".to_string()];
-        // " [1:tab-1 x] " is 13 cells at advance 9: segment [8, 125).
-        // Close zone = last 3 cells: [8 + 10*9, 125) = [98, 125).
-        assert_eq!(tab_close_hit(&titles, 0, 9.0, 8.0, 1.0, 98.0), Some(0));
-        assert_eq!(tab_close_hit(&titles, 0, 9.0, 8.0, 1.0, 124.9), Some(0));
+        // " 1  tab-1 x " is 12 cells at advance 9: segment [8, 116).
+        // Close zone = last 3 cells: [8 + 9*9, 116) = [89, 116).
+        assert_eq!(tab_close_hit(&titles, 9.0, 8.0, 1.0, 89.0), Some(0));
+        assert_eq!(tab_close_hit(&titles, 9.0, 8.0, 1.0, 115.9), Some(0));
         // Just left of the zone is tab 0 but NOT its close mark.
-        assert_eq!(tab_close_hit(&titles, 0, 9.0, 8.0, 1.0, 97.9), None);
-        assert_eq!(tab_hit(&tab_regions(&titles, 0, 9.0, 8.0, 1.0), 97.9), Some(0));
+        assert_eq!(tab_close_hit(&titles, 9.0, 8.0, 1.0, 88.9), None);
+        assert_eq!(tab_hit(&tab_regions(&titles, 9.0, 8.0, 1.0), 88.9), Some(0));
         // Second tab's zone starts where its segment ends minus 3 cells.
-        let regions = tab_regions(&titles, 0, 9.0, 8.0, 1.0);
+        let regions = tab_regions(&titles, 9.0, 8.0, 1.0);
         assert_eq!(
-            tab_close_hit(&titles, 0, 9.0, 8.0, 1.0, regions[1].1 - 1.0),
+            tab_close_hit(&titles, 9.0, 8.0, 1.0, regions[1].1 - 1.0),
             Some(1)
         );
-        assert_eq!(tab_close_hit(&titles, 0, 9.0, 8.0, 1.0, 0.0), None);
+        assert_eq!(tab_close_hit(&titles, 9.0, 8.0, 1.0, 0.0), None);
     }
 
     #[test]
-    fn tab_span_ranges_cover_active_and_close_marks() {
+    fn tab_spans_cover_index_active_and_close_marks() {
         let titles = vec!["tab-1".to_string(), "tab-2".to_string()];
-        // Joined: " [1:tab-1 x] " (0..13) + "  2:tab-2 x  " (13..26) + "  +" (26..29).
-        let (active, xs, plus) = tab_span_ranges(&titles, 0);
-        assert_eq!(active, 0..13);
-        assert_eq!(xs, vec![10..11, 23..24]);
-        assert_eq!(plus, 26..29);
-        let joined = tab_bar_text(&titles, 0);
-        assert_eq!(&joined[active.clone()], " [1:tab-1 x] ");
-        assert_eq!(&joined[xs[0].clone()], "x");
-        assert_eq!(&joined[xs[1].clone()], "x");
-        assert_eq!(&joined[plus], "  +");
-        // Active tab 1: ranges follow the brackets.
-        let (active, _, _) = tab_span_ranges(&titles, 1);
-        let joined1 = tab_bar_text(&titles, 1);
-        assert_eq!(&joined1[active], " [2:tab-2 x] ");
+        // Joined: " 1  tab-1 x " (0..12) + " 2  tab-2 x " (12..24) + "  +" (24..27).
+        let spans = tab_spans(&titles);
+        assert_eq!(spans.indices, vec![0..4, 12..16]);
+        assert_eq!(spans.closes, vec![10..11, 22..23]);
+        assert_eq!(spans.plus, 24..27);
+        let joined = tab_bar_text(&titles);
+        assert_eq!(&joined[spans.indices[0].clone()], " 1  ");
+        assert_eq!(&joined[spans.closes[0].clone()], "x");
+        assert_eq!(&joined[spans.closes[1].clone()], "x");
+        assert_eq!(&joined[spans.plus.clone()], "  +");
+        // The active title is the title only: no badge, no close mark.
+        let active = active_title_range(&titles, 0);
+        assert_eq!(&joined[active], "tab-1");
+        let active1 = active_title_range(&titles, 1);
+        assert_eq!(&joined[active1], "tab-2");
     }
 
     #[test]
     fn tab_new_hit_covers_plus_mark_only() {
         let titles = vec!["tab-1".to_string(), "tab-2".to_string()];
-        // Two 13-cell segments at advance 9 from x=8: bar ends at 8+234=242.
-        assert!(!tab_new_hit(&titles, 0, 9.0, 8.0, 1.0, 241.9));
-        assert!(tab_new_hit(&titles, 0, 9.0, 8.0, 1.0, 242.0));
-        assert!(tab_new_hit(&titles, 0, 9.0, 8.0, 1.0, 268.9));
-        assert!(!tab_new_hit(&titles, 0, 9.0, 8.0, 1.0, 269.0));
-        assert!(!tab_new_hit(&[], 0, 9.0, 8.0, 1.0, 8.0));
+        // Two 12-cell segments at advance 9 from x=8: bar ends at 8+216=224.
+        assert!(!tab_new_hit(&titles, 9.0, 8.0, 1.0, 223.9));
+        assert!(tab_new_hit(&titles, 9.0, 8.0, 1.0, 224.0));
+        assert!(tab_new_hit(&titles, 9.0, 8.0, 1.0, 250.9));
+        assert!(!tab_new_hit(&titles, 9.0, 8.0, 1.0, 251.0));
+        assert!(!tab_new_hit(&[], 9.0, 8.0, 1.0, 8.0));
     }
 
     #[test]
@@ -442,3 +476,4 @@ mod tests {
         assert!(strip_visible(2, "bogus"));
     }
 }
+
