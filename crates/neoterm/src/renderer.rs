@@ -28,6 +28,8 @@ pub struct PaneDraw {
     /// Cursor cell as (viewport row, grid column). The renderer draws the
     /// block here, behind the glyph, so the character stays readable.
     pub cursor: Option<(usize, usize)>,
+    /// This pane holds the keyboard focus (outlined; the others recede).
+    pub focused: bool,
 }
 
 /// Viewport scroll state driving the scrollbar (built per frame in main).
@@ -124,6 +126,9 @@ pub struct Renderer {
     font_family: Option<String>,
     /// Cursor block color (0..1 RGB, linear).
     cursor_rgb: [f32; 3],
+    /// Body background as a quad color (0..1 RGB, linear) — used for the
+    /// scrim that recedes unfocused panes.
+    bg_quad: [f32; 3],
     /// Theme quad colors (0..1 RGB): selection, scrollbar, tab strip,
     /// active-tab accent.
     sel_bg: [f32; 3],
@@ -263,6 +268,7 @@ impl Renderer {
             font_size,
             font_family,
             cursor_rgb: cursor_color(cfg),
+            bg_quad: bg_color(cfg),
             sel_bg: cfg.theme.selection_quad(),
             track_bg: cfg.theme.scrollbar_track_quad(),
             thumb_bg: cfg.theme.scrollbar_thumb_quad(),
@@ -300,6 +306,7 @@ impl Renderer {
         self.flash_bg = flash_color(cfg);
         self.fg = cfg.fg_glyphon();
         self.cursor_rgb = cursor_color(cfg);
+        self.bg_quad = bg_color(cfg);
         self.sel_bg = cfg.theme.selection_quad();
         self.track_bg = cfg.theme.scrollbar_track_quad();
         self.thumb_bg = cfg.theme.scrollbar_thumb_quad();
@@ -779,10 +786,60 @@ impl Renderer {
                 with_alpha(self.thumb_bg, 0.85),
             );
         }
+        // Focus treatment (only meaningful with more than one pane):
+        // the focused pane gets a hairline outline, the others recede
+        // behind a scrim drawn over their text in the last pass.
+        let mut scrim_verts: Vec<SelVertex> = Vec::new();
+        if panes.len() > 1 {
+            let hair = scale.max(1.0);
+            for pane in panes {
+                let x0 = body_left + pane.rect.col as f32 * cell_w;
+                let y0 = body_top + pane.rect.row as f32 * line_h;
+                let x1 = x0 + pane.rect.cols as f32 * cell_w;
+                let y1 = y0 + pane.rect.rows as f32 * line_h;
+                if pane.focused {
+                    // Outline, inset by one pixel so it never touches text.
+                    let a = with_alpha(self.tab_accent, 0.38);
+                    for (rx0, ry0, rx1, ry1) in [
+                        (x0 + hair, y0 + hair, x1 - hair, y0 + hair * 2.0),
+                        (x0 + hair, y1 - hair * 2.0, x1 - hair, y1 - hair),
+                        (x0 + hair, y0 + hair, x0 + hair * 2.0, y1 - hair),
+                        (x1 - hair * 2.0, y0 + hair, x1 - hair, y1 - hair),
+                    ] {
+                        push_quad(
+                            &mut bg_verts,
+                            rx0,
+                            ry0,
+                            rx1,
+                            ry1,
+                            w as f32,
+                            h as f32,
+                            a,
+                        );
+                    }
+                } else {
+                    // Scrim: the pane fades toward the background.
+                    push_quad(
+                        &mut scrim_verts,
+                        x0,
+                        y0,
+                        x1,
+                        y1,
+                        w as f32,
+                        h as f32,
+                        with_alpha(self.bg_quad, 0.38),
+                    );
+                }
+            }
+        }
+
         // Upload capped at the preallocated vertex buffer.
         bg_verts.truncate(MAX_BG_RECTS * SEL_VERTS_PER_RECT);
         let bg_count = bg_verts.len() as u32;
-        if bg_count > 0 {
+        let scrim_start = bg_count;
+        let scrim_count = scrim_verts.len() as u32;
+        bg_verts.extend_from_slice(&scrim_verts);
+        if bg_count + scrim_count > 0 {
             self.queue.write_buffer(
                 &self.bg_buffer,
                 0,
@@ -926,6 +983,28 @@ impl Renderer {
             });
             let _ = self.text_renderer.render(&self.atlas, &self.viewport, &mut pass);
         }
+        if scrim_count > 0 {
+            // Pass 3: unfocused panes recede behind a scrim.
+            let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
+                label: Some("neoterm-scrim"),
+                color_attachments: &[Some(RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: Operations {
+                        load: LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.bg_pipeline);
+            pass.set_vertex_buffer(0, self.bg_buffer.slice(..));
+            pass.draw(scrim_start..scrim_start + scrim_count, 0..1);
+        }
         self.queue.submit(Some(encoder.finish()));
         self.queue.present(frame);
         self.atlas.trim();
@@ -992,6 +1071,16 @@ fn flash_color(cfg: &NeotermConfig) -> wgpu::Color {
         b: mix(bg.b, b),
         a: 1.0,
     }
+}
+
+/// Body background as a linear RGB triple (the swapchain is an sRGB target).
+fn bg_color(cfg: &NeotermConfig) -> [f32; 3] {
+    let (r, g, b) = cfg.theme.background_rgb();
+    [
+        NeotermConfig::srgb8_to_linear(r),
+        NeotermConfig::srgb8_to_linear(g),
+        NeotermConfig::srgb8_to_linear(b),
+    ]
 }
 
 /// Cursor block color in linear RGB (the swapchain is an sRGB target).

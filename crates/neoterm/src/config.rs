@@ -195,6 +195,11 @@ impl Theme {
         Self::parse_hex_u8(&self.cursor)
     }
 
+    /// Body background as 8-bit RGB (the renderer needs it as a quad).
+    pub fn background_rgb(&self) -> (u8, u8, u8) {
+        Self::parse_hex_u8(&self.background)
+    }
+
     fn parse_hex_u8(s: &str) -> (u8, u8, u8) {
         NeotermConfig::parse_hex_u8(s)
     }

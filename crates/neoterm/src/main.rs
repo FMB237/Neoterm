@@ -1418,6 +1418,7 @@ impl ApplicationHandler for App {
                                     rect,
                                     rows,
                                     cursor,
+                                    focused: id == focus,
                                 });
                             }
                         }
