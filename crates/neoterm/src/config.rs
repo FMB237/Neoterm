@@ -28,9 +28,9 @@ pub struct Theme {
     pub tab_bar_bg: Option<String>,
     pub tab_active_fg: String,
     /// Reserved: kept for file compat, unused by the seamless strip.
-    pub tab_active_bg: String,
-    /// Reserved: kept for file compat, unused by the seamless strip.
     pub tab_accent: String,
+    /// Surface of the copy/paste toast in the tab strip.
+    pub tab_active_bg: String,
     /// Hairline under the tab strip (separates it from the body).
     pub tab_bar_border: String,
     /// Color of the dim tab index badge.
@@ -264,6 +264,11 @@ impl Theme {
 
     pub fn tab_close_fg_glyphon(&self) -> glyphon::Color {
         Self::glyphon_color(&self.tab_close_fg)
+    }
+
+    /// Surface of the copy/paste toast.
+    pub fn tab_active_bg_quad(&self) -> [f32; 3] {
+        Self::quad_f32(&self.tab_active_bg)
     }
 
     /// Hairline under the tab strip.

@@ -109,6 +109,8 @@ pub struct Renderer {
     atlas: TextAtlas,
     text_renderer: TextRenderer,
     tab_buffer: Buffer,
+    /// Toast label (copy / paste confirmation), drawn over the body.
+    toast_buffer: Buffer,
     /// Text buffers + shaped-row caches per pane id (rebuilt on row-count
     /// change; pruned when panes close).
     pane_buffers: HashMap<PaneId, Vec<Buffer>>,
@@ -145,6 +147,8 @@ pub struct Renderer {
     bg_glyph: Color,
     /// Hairline under the tab strip.
     tab_bar_border: [f32; 3],
+    /// Surface of the copy/paste toast.
+    toast_bg: [f32; 3],
     // Perf gate: skip cosmic-text shaping when content is unchanged.
     last_tab_text: String,
     /// Hovered tab (the close mark is revealed on it).
@@ -205,6 +209,7 @@ impl Renderer {
         let font_family = resolve_family(&mut font_system, &cfg.font_family);
         let font_size = cfg.font_size;
         let mut tab_buffer = Buffer::new(&mut font_system, Metrics::new(font_size, font_size * 1.3));
+        let mut toast_buffer = Buffer::new(&mut font_system, Metrics::new(font_size, font_size * 1.3));
         tab_buffer.set_size(Some(2000.0), Some(40.0));
 
         // Solid-rect pipeline for selection backgrounds.
@@ -265,6 +270,7 @@ impl Renderer {
             atlas,
             text_renderer,
             tab_buffer,
+            toast_buffer,
             pane_buffers: HashMap::new(),
             pane_rows: HashMap::new(),
             window,
@@ -287,6 +293,7 @@ impl Renderer {
             tab_index_fg: cfg.theme.tab_index_fg_glyphon(),
             bg_glyph: cfg.theme.bg_glyphon(),
             tab_bar_border: cfg.theme.tab_bar_border_quad(),
+            toast_bg: cfg.theme.tab_active_bg_quad(),
             last_tab_text: String::new(),
             last_hover: None,
             measured_advance: None,
@@ -329,6 +336,7 @@ impl Renderer {
         self.tab_index_fg = cfg.theme.tab_index_fg_glyphon();
         self.bg_glyph = cfg.theme.bg_glyphon();
         self.tab_bar_border = cfg.theme.tab_bar_border_quad();
+        self.toast_bg = cfg.theme.tab_active_bg_quad();
         // Family is resolved against the installed fonts; a missing family
         // falls back to generic monospace instead of a proportional face.
         let family = resolve_family(&mut self.font_system, &cfg.font_family);
@@ -485,6 +493,7 @@ impl Renderer {
         titles: &[String],
         active: usize,
         hover: Option<usize>,
+        toast: Option<&str>,
         panes: &[PaneDraw],
         dividers: &[CellRect],
         scroll: ScrollState,
@@ -586,7 +595,7 @@ impl Renderer {
                 .collect();
             self.tab_buffer.set_rich_text(spans, &base, Shaping::Advanced, None);
             self.tab_buffer.shape_until_scroll(&mut self.font_system, false);
-            self.last_tab_text = tab_text;
+            self.last_tab_text = tab_text.clone();
             self.last_hover = hover;
         }
 
@@ -837,6 +846,33 @@ impl Renderer {
                 with_alpha(self.thumb_bg, 0.85),
             );
         }
+        // Toast: a pill in the body's bottom-right corner. Transient
+        // feedback belongs over the content, not in the tab strip (which
+        // is often full of long titles).
+        let mut toast_rect: Option<(f32, f32, f32, f32)> = None;
+        if let Some(msg) = toast {
+            let cell = self.advance() * scale;
+            let line_h = self.font_size * 1.3 * scale;
+            let text_w = msg.chars().count() as f32 * cell;
+            let pad = 8.0 * scale;
+            let pill_w = text_w + pad * 2.0;
+            let pill_h = line_h + pad;
+            let x1 = w as f32 - PAD_X * scale;
+            let y1 = h as f32 - PAD_BOTTOM * scale;
+            let (x0, y0) = (x1 - pill_w, y1 - pill_h);
+            push_quad(
+                &mut bg_verts,
+                x0,
+                y0,
+                x1,
+                y1,
+                w as f32,
+                h as f32,
+                with_alpha(self.toast_bg, 1.0),
+            );
+            toast_rect = Some((x0, y0, x1, y1));
+        }
+
         // Focus treatment (only meaningful with more than one pane):
         // the focused pane gets a hairline outline, the others recede
         // behind a scrim drawn over their text in the last pass.
@@ -898,6 +934,16 @@ impl Renderer {
             );
         }
 
+        // Toast label: shaped into its own buffer, drawn over the pill.
+        let mut toast_label: Option<(f32, f32)> = None;
+        if let (Some(msg), Some((x0, y0, _, _))) = (toast, toast_rect) {
+            let attrs = Attrs::new().family(Family::Monospace).color(self.fg);
+            self.toast_buffer.set_text(msg, &attrs, Shaping::Advanced, None);
+            self.toast_buffer.shape_until_scroll(&mut self.font_system, false);
+            let pad = 8.0 * scale;
+            toast_label = Some((x0 + pad, y0 + pad));
+        }
+
         // One text area per pane row, clipped to the pane rect so wide
         // glyphs never bleed across dividers.
         let mut total_rows = 0;
@@ -947,6 +993,24 @@ impl Renderer {
                     custom_glyphs: &[],
                 });
             }
+        }
+
+        // The toast label rides over the body.
+        if let Some((tx, ty)) = toast_label {
+            areas.push(TextArea {
+                buffer: &self.toast_buffer,
+                left: tx,
+                top: ty,
+                scale,
+                bounds: TextBounds {
+                    left: 0,
+                    top: 0,
+                    right: w as i32,
+                    bottom: h as i32,
+                },
+                default_color: self.fg,
+                custom_glyphs: &[],
+            });
         }
 
         if self

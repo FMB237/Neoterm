@@ -102,8 +102,6 @@ pub fn tab_bar_text(titles: &[String]) -> String {
 /// index badge, then the active segment.
 #[derive(Clone, Debug, Default)]
 pub struct TabSpans {
-    /// Byte range of the active tab's title.
-    pub active: Range<usize>,
     /// Byte range of each tab's index badge.
     pub indices: Vec<Range<usize>>,
     /// Byte range of each tab's close mark.

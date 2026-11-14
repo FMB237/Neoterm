@@ -70,6 +70,8 @@ struct App {
     clipboard: Option<Clipboard>,
     /// Visual bell: the body flashes until this instant.
     bell_flash_until: Option<Instant>,
+    /// Copy/paste confirmation shown in the tab strip.
+    toast: Option<(String, Instant)>,
     /// In-progress tab rename (Ctrl+Shift+R): the text being edited.
     rename: Option<RenameState>,
     // ---- mouse state (Stage 4) ----
@@ -142,6 +144,7 @@ impl App {
             last_strip: true,
             clipboard: None,
             bell_flash_until: None,
+            toast: None,
             rename: None,
             cursor_pos: None,
             selecting: false,
@@ -182,11 +185,14 @@ impl App {
             },
             None => return,
         };
+        let chars = text.chars().count();
         match self.clipboard() {
             Some(cb) => {
                 if let Err(e) = cb.set_text(text) {
                     log::error!("copy failed: {e}");
+                    return;
                 }
+                self.set_toast(format!("copied \u{00b7} {chars} chars"));
             }
             None => log::error!("copy failed: no clipboard"),
         }
@@ -203,7 +209,9 @@ impl App {
             },
             None => return,
         };
+        let chars = text.chars().count();
         self.write_paste(text);
+        self.set_toast(format!("pasted \u{00b7} {chars} chars"));
     }
 
     /// X11 middle-click: paste the PRIMARY selection buffer.
@@ -218,7 +226,9 @@ impl App {
             },
             None => return,
         };
+        let chars = text.chars().count();
         self.write_paste(text);
+        self.set_toast(format!("pasted \u{00b7} {chars} chars"));
     }
 
     /// X11 select-to-copy: mirror the active selection into PRIMARY so
@@ -242,6 +252,7 @@ impl App {
             Some(s) => s,
             None => return,
         };
+        let chars = text.chars().count();
         match self.clipboard() {
             Some(cb) => {
                 if let Err(e) = cb
@@ -250,7 +261,9 @@ impl App {
                     .text(text)
                 {
                     log::error!("primary copy failed: {e}");
+                    return;
                 }
+                self.set_toast(format!("copied \u{00b7} {chars} chars"));
             }
             None => log::error!("primary copy failed: no clipboard"),
         }
@@ -392,6 +405,13 @@ impl App {
     fn reset_font(&mut self) {
         self.font_override = None;
         self.apply_font_size(self.cfg.font_size);
+    }
+
+    /// Show a short confirmation in the tab strip (copy / paste).
+    fn set_toast(&mut self, text: String) {
+        self.toast = Some((text, Instant::now() + Duration::from_millis(1400)));
+        self.force_draw = true;
+        self.request_redraw();
     }
 
     /// Ctrl+Shift+R: start editing the active tab's title. The strip
@@ -636,7 +656,7 @@ impl App {
             }
             let window = self.window.as_ref()?;
             let renderer = self.renderer.as_ref()?;
-            let tabs = self.tabs.as_ref()?;
+            self.tabs.as_ref()?;
             let scale = window.scale_factor() as f32;
             let g = renderer.body_geometry(scale, self.strip_on());
             if pos.y as f32 >= g.3 {
@@ -652,7 +672,7 @@ impl App {
             let new_tab = (|| {
                 let window = self.window.as_ref()?;
                 let renderer = self.renderer.as_ref()?;
-                let tabs = self.tabs.as_ref()?;
+                self.tabs.as_ref()?;
                 let scale = window.scale_factor() as f32;
                 let g = renderer.body_geometry(scale, self.strip_on());
                 if pos.y as f32 >= g.3 {
@@ -677,7 +697,7 @@ impl App {
             let close = (|| {
                 let window = self.window.as_ref()?;
                 let renderer = self.renderer.as_ref()?;
-                let tabs = self.tabs.as_ref()?;
+                self.tabs.as_ref()?;
                 let scale = window.scale_factor() as f32;
                 let g = renderer.body_geometry(scale, self.strip_on());
                 let titles = self.tab_titles();
@@ -896,7 +916,7 @@ impl App {
             }
             let window = self.window.as_ref()?;
             let renderer = self.renderer.as_ref()?;
-            let tabs = self.tabs.as_ref()?;
+            self.tabs.as_ref()?;
             let scale = window.scale_factor() as f32;
             let g = renderer.body_geometry(scale, self.strip_on());
             if pos.y as f32 >= g.3 {
@@ -1484,6 +1504,7 @@ impl ApplicationHandler for App {
                         &titles,
                         t.active_index(),
                         hover,
+                        self.toast.as_ref().map(|(text, _)| text.as_str()),
                         &panes,
                         &divs,
                         scroll,
@@ -1540,6 +1561,14 @@ impl ApplicationHandler for App {
         if empty {
             event_loop.exit();
             return;
+        }
+        // Toast: expire it and repaint the strip without it.
+        if let Some((_, until)) = self.toast {
+            if Instant::now() >= until {
+                self.toast = None;
+                self.force_draw = true;
+                self.request_redraw();
+            }
         }
         // Visual bell: a BEL from any pane flashes the body briefly. The
         // flag is drained even when the bell is disabled, so it never
