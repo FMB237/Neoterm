@@ -13,6 +13,14 @@ pub enum InputAction {
     Copy,
     /// Paste OS clipboard text into the PTY.
     Paste,
+    /// Open the find/search overlay.
+    SearchToggle,
+    /// Jump to the next search match.
+    SearchNext,
+    /// Jump to the previous search match.
+    SearchPrev,
+    /// Cancel the active search and close the overlay.
+    SearchCancel,
     /// Scroll viewport one page (local scrollback, not sent to the app).
     ScrollPageUp,
     ScrollPageDown,
@@ -134,6 +142,7 @@ fn chrome_action(key: &Key, mods: ModifiersState) -> Option<InputAction> {
                 "P" => return Some(InputAction::PrevTab),
                 "C" => return Some(InputAction::Copy),
                 "V" => return Some(InputAction::Paste),
+                "F" => return Some(InputAction::SearchToggle),
                 "E" => return Some(InputAction::SplitV),
                 "O" => return Some(InputAction::SplitH),
                 "Z" => return Some(InputAction::ZoomPane),

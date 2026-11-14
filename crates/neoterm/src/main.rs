@@ -2,6 +2,7 @@ mod config;
 mod input;
 mod mouse;
 mod renderer;
+mod search;
 mod tab;
 mod tabs;
 
@@ -25,6 +26,7 @@ use winit::window::{CursorIcon, Window, WindowId};
 use config::NeotermConfig;
 use input::InputAction;
 use renderer::{PaneDraw, Renderer, ScrollState};
+use search::{SearchMatch, SearchState};
 use tab::{CellRect, PaneId, SplitDir};
 use tabs::Tabs;
 
@@ -74,6 +76,8 @@ struct App {
     toast: Option<(String, Instant)>,
     /// In-progress tab rename (Ctrl+Shift+R): the text being edited.
     rename: Option<RenameState>,
+    /// Active scrollback search (Ctrl+Shift+F): query + matches + current.
+    search: Option<SearchState>,
     // ---- mouse state (Stage 4) ----
     /// Last known cursor position in physical pixels.
     cursor_pos: Option<PhysicalPosition<f64>>,
@@ -146,6 +150,7 @@ impl App {
             bell_flash_until: None,
             toast: None,
             rename: None,
+            search: None,
             cursor_pos: None,
             selecting: false,
             left_held: false,
@@ -267,6 +272,180 @@ impl App {
             }
             None => log::error!("primary copy failed: no clipboard"),
         }
+    }
+
+    // ============================== search ==============================
+
+    /// Open a fresh search on the focused pane, or close an existing one.
+    fn toggle_search(&mut self) {
+        if self.search.is_some() {
+            self.search = None;
+            self.force_draw = true;
+            self.request_redraw();
+            return;
+        }
+        let Some(tab) = self.tabs.as_ref().and_then(|t| t.active()) else {
+            return;
+        };
+        let id = tab.active_id();
+        let Some(pane) = tab.pane(id) else {
+            return;
+        };
+        // Lock the term briefly to run an empty initial scan (builds the
+        // match list for the current grid content). The query is empty, so
+        // no matches are reported yet; typing populates them.
+        let term = match pane.term.lock() {
+            Ok(t) => t,
+            Err(_) => return,
+        };
+        self.search = Some(SearchState::new(String::new()));
+        // Run an initial pass so the state is tied to the current term.
+        drop(term);
+        self.force_draw = true;
+        self.request_redraw();
+    }
+
+    /// Close the active search.
+    fn search_cancel(&mut self) {
+        if self.search.is_some() {
+            self.search = None;
+            self.force_draw = true;
+            self.request_redraw();
+        }
+    }
+
+    /// Advance to the next match and scroll the focused pane to it.
+    fn search_next(&mut self) {
+        let (id, m) = {
+            let Some(tab) = self.tabs.as_mut().and_then(|t| t.active_mut()) else {
+                return;
+            };
+            let id = tab.active_id();
+            let Some(pane) = tab.pane(id) else {
+                return;
+            };
+            let Some(state) = self.search.as_mut() else {
+                return;
+            };
+            let term = match pane.term.lock() {
+                Ok(t) => t,
+                Err(_) => return,
+            };
+            state.search(&term);
+            drop(term);
+            let Some(m) = state.next_match() else {
+                return;
+            };
+            (id, m)
+        };
+        let Some(tab) = self.tabs.as_mut().and_then(|t| t.active_mut()) else {
+            return;
+        };
+        Self::scroll_pane_to_match(tab, id, &m);
+        self.force_draw = true;
+        self.request_redraw();
+    }
+
+    /// Advance to the previous match and scroll the focused pane to it.
+    fn search_prev(&mut self) {
+        let (id, m) = {
+            let Some(tab) = self.tabs.as_mut().and_then(|t| t.active_mut()) else {
+                return;
+            };
+            let id = tab.active_id();
+            let Some(pane) = tab.pane(id) else {
+                return;
+            };
+            let Some(state) = self.search.as_mut() else {
+                return;
+            };
+            let term = match pane.term.lock() {
+                Ok(t) => t,
+                Err(_) => return,
+            };
+            state.search(&term);
+            drop(term);
+            let Some(m) = state.prev_match() else {
+                return;
+            };
+            (id, m)
+        };
+        let Some(tab) = self.tabs.as_mut().and_then(|t| t.active_mut()) else {
+            return;
+        };
+        Self::scroll_pane_to_match(tab, id, &m);
+        self.force_draw = true;
+        self.request_redraw();
+    }
+
+    /// Scroll the focused pane so `match`'s grid line lands inside the
+    /// viewport (centered-ish).
+    fn scroll_pane_to_match(tab: &mut tab::Tab, _id: tab::PaneId, m: &SearchMatch) {
+        let (_cols, rows) = tab.grid_size();
+        let offset = tab.display_offset();
+        let target = m.line as i32;
+        let view_top = offset as i32;
+        let view_bottom = view_top + rows as i32 - 1;
+        // If the match line is already visible, no scroll needed.
+        if target >= view_top && target <= view_bottom {
+            return;
+        }
+        // Otherwise scroll so the line sits ~1/3 down from the top.
+        let new_offset = target.saturating_sub(rows as i32 / 3).max(0) as usize;
+        tab.scroll_to(new_offset);
+    }
+
+    /// Handle a typed character while search is active: append to query,
+    /// re-scan, and redraw. Returns `true` if the key was consumed by
+    /// search (so it is not forwarded to the PTY).
+    fn search_type_char(&mut self, ch: char) -> bool {
+        let Some(state) = self.search.as_mut() else {
+            return false;
+        };
+        state.query.push(ch);
+        let _ = state;
+        self.rescan_search();
+        true
+    }
+
+    /// Handle backspace while search is active.
+    fn search_backspace(&mut self) {
+        let mut popped = false;
+        if let Some(state) = self.search.as_mut() {
+            popped = state.query.pop().is_some();
+        }
+        if popped {
+            self.rescan_search();
+        }
+    }
+
+    /// Re-scan the focused pane's term with the current query and redraw.
+    fn rescan_search(&mut self) {
+        let Some(tab) = self.tabs.as_ref().and_then(|t| t.active()) else {
+            return;
+        };
+        let id = tab.active_id();
+        let Some(pane) = tab.pane(id) else {
+            return;
+        };
+        let Ok(term) = pane.term.lock() else {
+            return;
+        };
+        let Some(state) = self.search.as_mut() else {
+            drop(term);
+            return;
+        };
+        state.search(&term);
+        drop(term);
+        self.force_draw = true;
+        self.request_redraw();
+    }
+
+    /// Return a search highlight color (linearized amber) for match bg_rects.
+    fn search_highlight_rgb() -> (u8, u8, u8) {
+        // Amber highlight, sRGB -> linear handled by renderer via
+        // NeotermConfig::srgb8_to_linear. We pass raw sRGB here.
+        (255, 200, 50)
     }
 
     /// Shared paste core: normalize newlines, honor bracketed paste.
@@ -1260,6 +1439,31 @@ impl ApplicationHandler for App {
                     self.on_rename_key(&event);
                     return;
                 }
+                // A live search owns printable keys: they append to the
+                // query instead of reaching the shell. Chrome actions
+                // (Ctrl+Shift+F etc.) still pass through to map_key below.
+                if self.search.is_some() && event.state == ElementState::Pressed {
+                    match &event.logical_key {
+                        Key::Named(NamedKey::Backspace) => {
+                            self.search_backspace();
+                            return;
+                        }
+                        Key::Named(NamedKey::Escape) => {
+                            self.search_cancel();
+                            return;
+                        }
+                        _ => {}
+                    }
+                    // Any printable text gets appended to the query.
+                    if let Some(text) = &event.text {
+                        for c in text.chars() {
+                            if !c.is_control() {
+                                self.search_type_char(c);
+                            }
+                        }
+                        return;
+                    }
+                }
                 let alt = self
                     .tabs
                     .as_ref()
@@ -1394,6 +1598,10 @@ impl ApplicationHandler for App {
                         self.force_draw = true;
                         self.request_redraw();
                     }
+                    InputAction::SearchToggle => self.toggle_search(),
+                    InputAction::SearchNext => self.search_next(),
+                    InputAction::SearchPrev => self.search_prev(),
+                    InputAction::SearchCancel => self.search_cancel(),
                     InputAction::Ignored => {}
                 }
             }
@@ -1457,10 +1665,43 @@ impl ApplicationHandler for App {
                     if let Some(tab) = t.active() {
                         let layout = tab.layout();
                         let focus = tab.active_id();
+                        // Search highlights: grid line -> viewport row
+                        // mapping (grid_line = row_idx - offset, so
+                        // row_idx = grid_line + offset).
+                        let search_rows = self.search.as_ref().and_then(|s| {
+                            if s.matches().is_empty() {
+                                None
+                            } else {
+                                let offset = tab.display_offset() as i32;
+                                let (_, rows) = tab.grid_size();
+                                let highlight = Self::search_highlight_rgb();
+                                Some((s, offset, rows as i32, highlight))
+                            }
+                        });
                         for (id, rect) in layout.panes {
                             if let Some(pane) = tab.pane(id) {
                                 let cursor_on = if id == focus { blink } else { true };
-                                let (rows, cursor) = pane.rendered_rows(fg, bg, cursor_on);
+                                let (mut rows, cursor) =
+                                    pane.rendered_rows(fg, bg, cursor_on);
+                                // Apply search match highlights to visible rows.
+                                if let Some((state, offset, rows_cnt, highlight)) =
+                                    search_rows.as_ref()
+                                {
+                                    if id == focus {
+                                        for m in state.matches() {
+                                            let vrow = m.line + offset;
+                                            if vrow >= 0 && vrow < *rows_cnt {
+                                                let row = &mut rows[vrow as usize];
+                                                let rgb = *highlight;
+                                                row.bg_rects.push((
+                                                    m.col_start,
+                                                    m.col_end.saturating_sub(1),
+                                                    rgb,
+                                                ));
+                                            }
+                                        }
+                                    }
+                                }
                                 panes.push(PaneDraw {
                                     id,
                                     rect,

@@ -81,7 +81,7 @@ impl TitleListener {
 
     /// Headless constructor for tests (no event loop to wake).
     #[cfg(test)]
-    fn headless(fallback: &str) -> (Self, Arc<Mutex<String>>) {
+    pub(crate) fn headless(fallback: &str) -> (Self, Arc<Mutex<String>>) {
         Self::new(
             fallback.to_string(),
             Arc::new(AtomicBool::new(false)),
