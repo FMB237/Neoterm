@@ -94,24 +94,29 @@ something you cannot see. On X11 the PRIMARY buffer does get the selection,
 but the system clipboard (the thing `Ctrl+Shift+V` reads) gives no signal at
 all.
 
-**Proposal.** A short toast in the strip, right-aligned:
+**Proposal.** A short pill in the **bottom-right corner of the body**:
 
 ```
 copied · 42 chars
 ```
 
 Surface `theme.tab_active_bg` (`#292e42`) — the one reserved field in the
-theme finally gets a job. It fades in over 90 ms, holds 1.1 s, fades out over
-260 ms.
+theme finally gets a job. It holds for 1.4 s and then disappears.
+
+*Design note:* the first draft put the toast in the tab strip. On screen it
+was wrong: the strip is usually full of long tab titles, and a toast that
+silently drops when there is no room is worse than no toast. Transient
+feedback belongs over the content, where it has room and does not fight the
+tabs.
 
 **Implementation.**
 
 - `App` — a `toast: Option<(String, Instant)>` state, set by `do_copy`,
   `do_paste`, `do_paste_primary` and the selection auto-copy.
-- `renderer.rs` — the toast is drawn in the strip band: a background quad
-  (right-aligned, width = label cells × advance) plus the label text. The
-  strip text buffer is monospace, so the label can simply be appended to the
-  strip text with padding, and the quad computed from the character count.
+- `renderer.rs` — the toast has its own text buffer and its own text area:
+  a pill quad (in the background pass, so the label rides on top) plus the
+  label. Its position is the body's bottom-right corner, inset by the body
+  padding.
 - The toast expires on a timer; `about_to_wait` already schedules wakeups.
 
 **Accept.** Copying shows `copied · N chars` for ~1.2 s and then fades; the

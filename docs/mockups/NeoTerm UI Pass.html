@@ -145,11 +145,11 @@ h2 .n{color:var(--page-accent);margin-right:10px;font-weight:400}
 
 /* ---------- copy toast ---------- */
 .toast{
-  position:absolute;right:16px;top:8px;
+  position:absolute;right:var(--pad);bottom:var(--pad);
   background:var(--nt-pane);color:var(--nt-fg);
-  border:1px solid #33385a;border-radius:5px;
-  padding:4px 10px;font-size:11.5px;letter-spacing:.01em;
-  box-shadow:0 6px 18px rgba(0,0,0,.4);
+  border-radius:5px;
+  padding:7px 12px;font-size:12px;letter-spacing:.01em;
+  box-shadow:0 8px 24px rgba(0,0,0,.45);
 }
 .toast .k{color:var(--nt-accent)}
 
@@ -212,14 +212,14 @@ td code{color:var(--nt-accent)}
 
 <h2><span class="n">01</span>Today vs proposal — same scene, same geometry</h2>
 <p class="lede">
-  Left: what NeoTerm renders now. Right: the proposal. Both are drawn from the same tokens and
-  the same cell metrics, so the differences you see are the differences you would get in the app.
+  Left: what NeoTerm rendered before the pass. Right: what it renders now. Both are drawn from the same
+  tokens and the same cell metrics, so the differences you see are the differences you get in the app.
 </p>
 
 <div class="mock">
   <div class="mock-label">
-    <span class="tag">today</span>
-    <span class="name">current NeoTerm</span>
+    <span class="tag">before</span>
+    <span class="name">NeoTerm before the pass</span>
     <span class="note">seamless strip · block cursor replaces the glyph · no focus cue</span>
   </div>
   <div class="stage">
@@ -249,8 +249,8 @@ td code{color:var(--nt-accent)}
 
 <div class="mock">
   <div class="mock-label">
-    <span class="tag">proposal</span>
-    <span class="name">the UI pass</span>
+    <span class="tag">after</span>
+    <span class="name">NeoTerm with the UI pass (shipped)</span>
     <span class="note">hairline strip · index badge · close on hover · cursor behind the glyph · focus outline · copy toast</span>
   </div>
   <div class="stage">
@@ -271,7 +271,6 @@ td code{color:var(--nt-accent)}
           <span class="title">htop</span>
           <span class="x">×</span>
         </div>
-        <div class="toast"><span class="k">copied</span> · 42 chars</div>
       </div>
       <div class="split">
         <div class="pane focused">
@@ -286,6 +285,7 @@ td code{color:var(--nt-accent)}
           <div class="line dim">the focused pane is outlined</div>
           <div class="line dim">and the cursor never hides a glyph</div>
         </div>
+        <div class="toast"><span class="k">copied</span> · 42 chars</div>
       </div>
     </div>
   </div>
@@ -425,12 +425,12 @@ td code{color:var(--nt-accent)}
     <tr>
       <td>Toast surface</td>
       <td><code>theme.tab_active_bg</code></td>
-      <td><span class="sw" style="background:#292e42"></span><code>#292e42</code> — the one reserved field in the theme finally gets a job.</td>
+      <td><span class="sw" style="background:#292e42"></span><code>#292e42</code> — the one reserved field in the theme finally gets a job. The pill sits in the body's bottom-right corner, not in the strip: the strip is often full of long titles.</td>
     </tr>
     <tr>
       <td>Timing</td>
       <td>—</td>
-      <td>hover fade 120 ms · toast in 90 ms / hold 1.1 s / out 260 ms · focus outline instant (no animation on a focus cue).</td>
+      <td>hover fade 120 ms · toast hold 1.4 s · focus outline instant (no animation on a focus cue).</td>
     </tr>
   </tbody>
 </table>
