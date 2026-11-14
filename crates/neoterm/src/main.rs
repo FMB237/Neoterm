@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line, Point, Side};
 use alacritty_terminal::selection::SelectionType;
 use alacritty_terminal::term::TermMode;
@@ -946,6 +947,39 @@ impl App {
             // Divider, tab bar, or outside: no selection, no app report.
             return;
         };
+        // Ctrl+click on a hyperlink cell: open the URI in the default browser.
+        // Takes priority over selection and app-mouse reporting.
+        if self.mods.state().control_key() {
+            if let Some(tab) = self.tabs.as_ref().and_then(|t| t.active()) {
+                if let Some(pane) = tab.pane(pid) {
+                    if let Ok(term) = pane.term.lock() {
+                        let grid = term.grid();
+                        let screen_lines = term.screen_lines();
+                        let grid_line = vrow as i32 - pane.display_offset() as i32;
+                        if grid_line >= 0 && (grid_line as usize) < screen_lines {
+                            let row = &grid[Line(grid_line)];
+                            let cell = &row[Column(col)];
+                            if let Some(hyperlink) = cell.hyperlink() {
+                                let uri = hyperlink.uri().to_string();
+                                if cfg!(target_os = "macos") {
+                                    let _ = std::process::Command::new("open").arg(&uri).spawn();
+                                } else if cfg!(target_os = "windows") {
+                                    let _ = std::process::Command::new("cmd")
+                                        .args(["/C", "start", "", &uri])
+                                        .spawn();
+                                } else {
+                                    let _ = std::process::Command::new("xdg-open")
+                                        .arg(&uri)
+                                        .spawn();
+                                }
+                                self.request_redraw();
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        }
         // Click focuses another pane without starting selection.
         let focused = match self.tabs.as_mut() {
             Some(tabs) => match tabs.active_mut() {

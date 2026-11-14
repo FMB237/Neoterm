@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
-use cosmic_text::{AttrsList, BufferLine, LineEnding, Style, Weight};
+use cosmic_text::{AttrsList, BufferLine, LineEnding, Style, UnderlineStyle, Weight};
 use glyphon::{
     Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping, SwashCache,
     TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
@@ -482,6 +482,9 @@ impl Renderer {
             }
             if style.italic {
                 attrs = attrs.style(Style::Italic);
+            }
+            if style.hyperlink.is_some() {
+                attrs = attrs.underline(UnderlineStyle::Single);
             }
             list.add_span(range.clone(), &attrs);
         }

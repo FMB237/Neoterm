@@ -1342,6 +1342,7 @@ pub fn render_term_rows(
                         bg,
                         bold,
                         italic,
+                        hyperlink: cell.hyperlink().map(|h| h.uri().to_string()),
                     },
                 ));
             }
@@ -1383,7 +1384,7 @@ pub fn render_term_rows(
                         continue;
                     }
                 }
-                spans.push((start..end, *style));
+                spans.push((start..end, style.clone()));
             }
             out.push(RowContent {
                 text,
@@ -1402,12 +1403,14 @@ pub fn render_term_rows(
 ///
 /// `bg` is resolved for INVERSE handling and future per-cell background
 /// rects. Selection backgrounds are drawn by the renderer's rect pass.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// `hyperlink` holds the OSC 8 URI when this cell is a hyperlink target.
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct CellStyle {
     pub fg: (u8, u8, u8),
     pub bg: (u8, u8, u8),
     pub bold: bool,
     pub italic: bool,
+    pub hyperlink: Option<String>,
 }
 
 /// One visible terminal row: plain text plus byte-range style spans.
