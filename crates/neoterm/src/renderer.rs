@@ -18,6 +18,7 @@ use winit::{dpi::LogicalSize, window::Window};
 use crate::config::NeotermConfig;
 use crate::mouse;
 use crate::tab::{CellRect, PaneId, RowContent};
+use vte::ansi::CursorShape;
 
 /// One pane's drawable content for a frame: grid rect (body-relative
 /// cells) plus resolved rows. Built per frame in main from the tab layout.
@@ -25,9 +26,9 @@ pub struct PaneDraw {
     pub id: PaneId,
     pub rect: CellRect,
     pub rows: Vec<RowContent>,
-    /// Cursor cell as (viewport row, grid column). The renderer draws the
-    /// block here, behind the glyph, so the character stays readable.
-    pub cursor: Option<(usize, usize)>,
+    /// Cursor cell as (viewport row, grid column, cursor shape). `None`
+    /// when hidden or scrolled away.
+    pub cursor: Option<(usize, usize, CursorShape)>,
     /// This pane holds the keyboard focus (outlined; the others recede).
     pub focused: bool,
 }
@@ -750,21 +751,107 @@ impl Renderer {
         for pane in panes {
             let ox = body_left + pane.rect.col as f32 * cell_w;
             let oy = body_top + pane.rect.row as f32 * line_h;
-            // Cursor block: drawn before the text, so the glyph sits on top
-            // of it (inverse video) and stays readable.
-            if let Some((row, col)) = pane.cursor {
-                let x0 = ox + col as f32 * cell_w;
-                let y0 = oy + row as f32 * line_h;
-                push_quad(
-                    &mut bg_verts,
-                    x0,
-                    y0,
-                    x0 + cell_w,
-                    y0 + line_h,
-                    w as f32,
-                    h as f32,
-                    with_alpha(self.cursor_rgb, 1.0),
-                );
+            // Cursor: drawn before the text, so the glyph sits on top
+            // of it (inverse video) and stays readable. Different shapes:
+            // Block fills the cell, Underline draws a bottom bar, Beam draws
+            // a thin vertical bar, HollowBlock draws the cell outline,
+            // Hidden draws nothing.
+            if let Some((row, col, shape)) = pane.cursor {
+                match shape {
+                    CursorShape::Block => {
+                        let x0 = ox + col as f32 * cell_w;
+                        let y0 = oy + row as f32 * line_h;
+                        push_quad(
+                            &mut bg_verts,
+                            x0,
+                            y0,
+                            x0 + cell_w,
+                            y0 + line_h,
+                            w as f32,
+                            h as f32,
+                            with_alpha(self.cursor_rgb, 1.0),
+                        );
+                    }
+                    CursorShape::Underline => {
+                        let underline_h = (line_h * 0.2).max(2.0);
+                        let x0 = ox + col as f32 * cell_w;
+                        let y0 = oy + (row as f32 + 1.0) * line_h - underline_h;
+                        push_quad(
+                            &mut bg_verts,
+                            x0,
+                            y0,
+                            x0 + cell_w,
+                            y0 + underline_h,
+                            w as f32,
+                            h as f32,
+                            with_alpha(self.cursor_rgb, 1.0),
+                        );
+                    }
+                    CursorShape::Beam => {
+                        let beam_w = (cell_w * 0.2).max(1.0);
+                        let x0 = ox + col as f32 * cell_w;
+                        let y0 = oy + row as f32 * line_h;
+                        push_quad(
+                            &mut bg_verts,
+                            x0,
+                            y0,
+                            x0 + beam_w,
+                            y0 + line_h,
+                            w as f32,
+                            h as f32,
+                            with_alpha(self.cursor_rgb, 1.0),
+                        );
+                    }
+                    CursorShape::HollowBlock => {
+                        let border = (cell_w * 0.1).max(1.0);
+                        let x0 = ox + col as f32 * cell_w;
+                        let y0 = oy + row as f32 * line_h;
+                        let x1 = x0 + cell_w;
+                        let y1 = y0 + line_h;
+                        // Top, bottom, left, right borders.
+                        push_quad(
+                            &mut bg_verts,
+                            x0,
+                            y0,
+                            x1,
+                            y0 + border,
+                            w as f32,
+                            h as f32,
+                            with_alpha(self.cursor_rgb, 1.0),
+                        );
+                        push_quad(
+                            &mut bg_verts,
+                            x0,
+                            y1 - border,
+                            x1,
+                            y1,
+                            w as f32,
+                            h as f32,
+                            with_alpha(self.cursor_rgb, 1.0),
+                        );
+                        push_quad(
+                            &mut bg_verts,
+                            x0,
+                            y0,
+                            x0 + border,
+                            y1,
+                            w as f32,
+                            h as f32,
+                            with_alpha(self.cursor_rgb, 1.0),
+                        );
+                        push_quad(
+                            &mut bg_verts,
+                            x1 - border,
+                            y0,
+                            x1,
+                            y1,
+                            w as f32,
+                            h as f32,
+                            with_alpha(self.cursor_rgb, 1.0),
+                        );
+                    }
+                    CursorShape::Hidden => {}
+                }
             }
             for (i, row) in pane.rows.iter().enumerate() {
                 let y0 = oy + i as f32 * line_h;

@@ -7,7 +7,7 @@ use alacritty_terminal::term::{
     Config as TermConfig, Term, TermDamage, TermMode,
 };
 use alacritty_terminal::selection::{Selection, SelectionRange, SelectionType};
-use alacritty_terminal::vte::ansi::{Color as AnsiColor, NamedColor, Rgb};
+use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedColor, Rgb};
 use anyhow::{Context, Result};
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::io::{Read, Write};
@@ -462,15 +462,16 @@ impl Pane {
     /// Stage 1 renderer draws no per-cell backgrounds.
     ///
     /// When `cursor_visible`, the cursor cell is returned as
-    /// `(viewport row, grid column)` and its glyph is recolored to the
-    /// background color; the renderer draws the block behind it. The
-    /// character under the cursor therefore stays readable.
+    /// `(viewport row, grid column, cursor shape)` and its glyph is
+    /// recolored to the background color; the renderer draws the block
+    /// behind it. The character under the cursor therefore stays readable.
+    /// `None` when the cursor is hidden or scrolled away.
     pub fn rendered_rows(
         &self,
         default_fg: (u8, u8, u8),
         default_bg: (u8, u8, u8),
         cursor_visible: bool,
-    ) -> (Vec<RowContent>, Option<(usize, usize)>) {
+    ) -> (Vec<RowContent>, Option<(usize, usize, CursorShape)>) {
         let Ok(term) = self.term.lock() else {
             return (vec![], None);
         };
@@ -1244,7 +1245,7 @@ pub fn render_term_rows(
     default_bg: (u8, u8, u8),
     cursor_visible: bool,
     palette: &[(u8, u8, u8); 16],
-) -> (Vec<RowContent>, Option<(usize, usize)>) {
+) -> (Vec<RowContent>, Option<(usize, usize, CursorShape)>) {
         let cols = term.columns();
         let rows = term.screen_lines();
         let colors = term.colors();
@@ -1259,14 +1260,16 @@ pub fn render_term_rows(
             term.selection.as_ref().and_then(|s| s.to_range(&*term));
 
         let cpoint = grid.cursor.point;
+        let cursor_shape = term.cursor_style().shape;
         // Cursor in viewport-row coordinates; off-screen while scrolled.
         let cursor_vrow = cpoint.line.0 + offset;
         let cursor_col = cpoint.column.0.min(cols.saturating_sub(1));
         // The cursor cell the renderer draws its block in: (viewport row,
-        // grid column). `None` when the cursor is hidden or scrolled away.
-        let cursor_cell: Option<(usize, usize)> =
+        // grid column, shape). `None` when the cursor is hidden or scrolled
+        // away; Hidden shape means no block is drawn.
+        let cursor_cell: Option<(usize, usize, CursorShape)> =
             if cursor_visible && cursor_vrow >= 0 && (cursor_vrow as usize) < rows {
-                Some((cursor_vrow as usize, cursor_col))
+                Some((cursor_vrow as usize, cursor_col, cursor_shape))
             } else {
                 None
             };
@@ -1715,7 +1718,7 @@ mod tests {
         feed(&mut term, "abc\x08");
 
         let (rows, cursor) = render_term_rows(&term, WHITE, BLACK, true, &XTERM_BASE);
-        assert_eq!(cursor, Some((0, 2)));
+        assert_eq!(cursor, Some((0, 2, CursorShape::Block)));
         // The character is still there (no block glyph substituted).
         assert_eq!(rows[0].text, "abc");
         // ...and it is recolored to the background (inverse video), so the
