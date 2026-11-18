@@ -1,8 +1,9 @@
 [package]
 name = "neoterm"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
-description = "NeoTerm v0.2 - GPU terminal with tabs + themes (pure Rust)"
+description = "NeoTerm v0.3 - GPU terminal with tabs + themes (pure Rust)"
+license = "MIT"
 
 [[bin]]
 name = "neoterm"

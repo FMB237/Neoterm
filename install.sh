@@ -1,5 +1,5 @@
 #!/bin/bash
-# NeoTerm 0.2 installer.
+# NeoTerm 0.3 installer.
 #
 #   ./install.sh            user install  (~/.local, no sudo)
 #   ./install.sh --system   system install (/usr/local, needs sudo)

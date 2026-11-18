@@ -32,7 +32,7 @@ use tab::{CellRect, PaneId, SplitDir};
 use tabs::Tabs;
 
 #[derive(Parser, Debug)]
-#[command(name = "neoterm", version, about = "NeoTerm v0.2 - GPU terminal")]
+#[command(name = "neoterm", version, about = "NeoTerm v0.3 - GPU terminal")]
 struct Args {
     /// Command / shell to run (overrides config)
     #[arg(short = 'e', long)]
@@ -1427,7 +1427,7 @@ impl ApplicationHandler for App {
             return;
         }
         let attrs = Window::default_attributes()
-            .with_title("NeoTerm 0.2")
+            .with_title("NeoTerm 0.3")
             .with_inner_size(Renderer::window_logical_size());
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
 
@@ -1450,8 +1450,8 @@ impl ApplicationHandler for App {
             }
         }
         log::info!(
-            "NeoTerm v0.2 ready: Ctrl+Shift+T new tab, Ctrl+Shift+W close, \
-             Ctrl+Tab switch, Ctrl+Shift+± font size"
+            "NeoTerm v0.3 ready: Ctrl+Shift+T new tab, Ctrl+Shift+W close, \
+             Ctrl+Shift+F search, Ctrl+Tab switch, Ctrl+Shift+± font size"
         );
     }
 
