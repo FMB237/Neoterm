@@ -12,7 +12,7 @@ Project doc (user-facing): `Neoterm.md` — keep it in sync with reality.
 ## 1. Where the project stands
 
 **NeoTerm** — GPU terminal emulator in pure Rust. Tabs, splits, themes, no
-toolkit. Currently **v0.2.0**, installed via `./install.sh` into `~/.local`.
+toolkit. Currently **v0.3.0**, installed via `./install.sh` into `~/.local`.
 
 | Layer | Crate |
 |---|---|
@@ -25,7 +25,7 @@ toolkit. Currently **v0.2.0**, installed via `./install.sh` into `~/.local`.
 | Config | serde 1 + toml 0.8, watched with notify 6 |
 | CLI | clap 4 |
 
-Size: **~5,860 lines / 7 modules / 31 headless tests** (`cargo test`).
+Size: **~6,980 lines / 8 modules / 41 headless tests** (`cargo test`).
 
 ### 1.1 Already shipped (do not redo)
 
@@ -92,14 +92,31 @@ New tests (26 → 31): bell flag raises + wakes the loop, pinned title wins
 over the live title, `bell` option parsing (default + explicit `none`),
 and the rename/unpin shortcut mapping.
 
-### 1.4 In flight / open threads
+### 1.4 Completed in Batch B (2026-11-14)
 
-- Nothing half-finished. Batch A ended with a clean build, 31/31 tests
-  green, and a manual pass on a real X server.
-- The roadmap below was re-audited; **Batch B (medium items) has not been
-  started**.
+Batch B shipped B0–B3; B4 and B5 remain (see §4). All of it was verified on
+screen as well as by tests, and every item below is a real commit.
 
-### 1.5 Git history
+| Change | Where | Notes |
+|---|---|---|
+| **B0. Global UI pass** | `renderer.rs`, `main.rs`, `mouse.rs`, `config.rs` | The cursor is drawn *behind* the glyph (inverse video) instead of replacing the character; unfocused panes recede behind a scrim and the focused pane gets a hairline outline; the tab strip became an index badge + clean title + hairline, with the close mark revealed on hover; copy/paste report through a pill in the body's bottom-right corner. New theme fields `tab_bar_border`, `tab_index_fg`. |
+| **B1. Scrollback search** | `search.rs` (new, 345 lines), `main.rs`, `input.rs` | `Ctrl+Shift+F` opens a search over the focused pane's history *and* viewport; typing rescans live, `Enter`/`Ctrl+G` jump to the next match, `Shift+Enter` to the previous, `Esc` closes. Matches are highlighted through the existing per-cell bg-rect pass, in a muted accent. The engine is pure and headless-testable (9 tests). |
+| **B2. OSC 8 hyperlinks** | `tab.rs`, `renderer.rs`, `main.rs` | `RowContent::StyledSpan` carries the link URI; link cells render underlined; `Ctrl+click` opens the URI with `xdg-open` / `open` / `start` depending on the platform, taking priority over selection and SGR reporting. |
+| **B3. Cursor styles** | `renderer.rs`, `tab.rs` | `DECSCUSR` is honored: block, underline, beam and hollow block, drawn as geometry in the background pass so the glyph stays visible. `CursorShape::Hidden` draws nothing. The block still keeps the character underneath readable. |
+
+### 1.5 In flight / open threads
+
+- Nothing half-finished. Batch B's published slice (B0–B3) ends with a clean
+  build and **41/41 tests** green.
+- Two known gaps, both deliberate and recorded rather than hidden:
+  - **Search has no visible query field.** Matches highlight and the pane
+    scrolls, but the typed query and match count are not drawn anywhere yet;
+    a persistent search bar is the next B1 polish item.
+  - **`SGR 4` (plain underline) is still not drawn.** B2 underlines hyperlink
+    cells only; `CellStyle` carries bold/italic but no underline flag. This is
+    the cheap fidelity fix listed in §4.
+
+### 1.6 Git history (through v0.3.0)
 
 The project was developed before the repository existed, so the first
 publication had a single squashed commit. The history was rebuilt on
@@ -122,6 +139,20 @@ The October commits are a *reconstruction* of the states the code had then
 the original bytes were never kept anywhere. The two November commits are the
 original work, commit for commit. The README says so too.
 
+Everything after `f5d4b46` is original work as well, one commit per feature:
+
+| Commit | Date | Tests | Content |
+|---|---|---|---|
+| `7c421d1` | Nov 13 | 31 | UI pass: mockup + implementation plan |
+| `62400d8` | Nov 14 | 32 | cursor drawn behind the glyph |
+| `c096f5b` | Nov 14 | 32 | focus indicator for split panes |
+| `d844fda` | Nov 14 | 32 | tab strip redesign (badge, hover, hairline) |
+| `f917712` | Nov 14 | 32 | copy/paste feedback in the body corner |
+| `1b31670` | Nov 14 | 41 | B1 — scrollback search |
+| `ecb7408` | Nov 14 | 41 | B2 — OSC 8 hyperlinks |
+| `1580866` | Nov 14 | 41 | B3 — cursor styles |
+
+
 ---
 
 ## 2. Repository map
@@ -134,24 +165,27 @@ original work, commit for commit. The README says so too.
 ├── install.sh / uninstall.sh / launcher.sh
 ├── assets/                     neoterm.desktop, neoterm.svg
 └── crates/neoterm/src/
-    ├── main.rs      (~1570)  App event loop, mouse/keyboard handlers, draw
+    ├── main.rs      (~1920)  App event loop, mouse/keyboard handlers, draw
     │                          orchestration, config watcher, strip-visibility
     │                          reflow, font zoom + grid reflow, visual bell,
-    │                          tab rename mode
-    ├── tab.rs       (~1840)  Pane (PTY, grid, selection, OSC title listener),
+    │                          tab rename mode, search bar + hyperlink opening
+    ├── tab.rs       (~1860)  Pane (PTY, grid, selection, OSC title listener),
     │                          PaneNode split tree, layout_tree /
     │                          focus_neighbor / clamp_ratio, Tab container
     │                          (title pins), free render_term_rows
-    ├── renderer.rs  (~1010)  wgpu setup, per-pane buffer caches, font-family
-    │                          + advance probing, pass 1 alpha rects,
+    ├── renderer.rs  (~1330)  wgpu setup, per-pane buffer caches, font-family
+    │                          + advance probing, pass 1 alpha rects (incl.
+    │                          cursor geometry, focus outline, toast),
     │                          pass 2 shaped text, bell flash
-    ├── config.rs    (~510)   NeotermConfig + Theme pack, preset application,
+    ├── config.rs    (~550)   NeotermConfig + Theme pack, preset application,
     │                          sRGB→linear conversion, `bell` option
-    ├── mouse.rs     (~440)   pure geometry: labels, regions, close/+ zones,
+    ├── mouse.rs     (~480)   pure geometry: labels, regions, close/+ zones,
     │                          scrollbar math, SGR encoding
-    ├── input.rs     (~250)   key event → InputAction (chrome_action table)
-    └── tabs.rs      (~240)   tab list, ids, split/close/focus/zoom dispatch,
-                           dead-pane reaping, title pins
+    ├── search.rs    (~345)   pure scrollback search: match list, next/prev,
+    │                          case folding — no winit/wgpu dependency
+    ├── input.rs     (~260)   key event → InputAction (chrome_action table)
+    └── tabs.rs      (~235)   tab list, ids, split/close/focus/zoom dispatch,
+                              dead-pane reaping, title pins
 ```
 
 Architecture at a glance:
@@ -216,7 +250,7 @@ design notes and the two bugs that the visual pass caught.
 - ~~**A3. Manual tab rename (pinned title)**~~ — done (`Ctrl+Shift+R` /
   `Ctrl+Shift+U`).
 
-### Batch B — medium items — **next up**
+### Batch B — medium items — **B0–B3 done, B4–B5 left**
 
 - **B0. Global UI pass — DONE** — the interface work specified in
   [`docs/ui-pass.md`](docs/ui-pass.md), with the mockup in
@@ -234,24 +268,25 @@ design notes and the two bugs that the visual pass caught.
   New theme fields: `tab_bar_border`, `tab_index_fg`; `tab_active_bg` now
   has a job (the toast surface). Direction: *quiet chrome* — nothing
   permanent, nothing decorative.
-- **B1. Scrollback search** — `Ctrl+Shift+F`, search the focused pane's
-  history + viewport, jump to the match, and highlight every match through the
-  existing bg-rect pass (`RowContent::bg_rects` already supports per-cell
-  rects, so highlights are nearly free). Needs a small search-index + a
-  results list overlay.
-- **B2. OSC 8 hyperlinks** — parse `OSC 8 ; uri ; text ST`, render the link
-  text underlined (needs underline support in `CellStyle` → `Attrs`), and open
-  on `Ctrl+click`. Requires an external-opener crate or `xdg-open`/`gio open`.
-- **B3. Cursor styles** — block / underline / beam + blink, honoring `DECSCUSR`.
-  Today the cursor is a `█` glyph inserted into the row (drift-free by
-  construction) — switching to a drawn cursor must keep that property.
+- ~~**B1. Scrollback search**~~ — done (`1b31670`): `search.rs` is a pure
+  engine over history + viewport, `Ctrl+Shift+F` opens it, `Enter` /
+  `Shift+Enter` jump, `Esc` closes, matches highlight through the bg-rect
+  pass. **Open:** the typed query and match count are not drawn yet — a
+  persistent search bar is the next polish item.
+- ~~**B2. OSC 8 hyperlinks**~~ — done (`ecb7408`): link cells render
+  underlined, `Ctrl+click` opens the URI (`xdg-open` / `open` / `start`).
+  **Open:** plain `SGR 4` still renders without an underline (below).
+- ~~**B3. Cursor styles**~~ — done (`1580866`): block, underline, beam and
+  hollow block, honoring `DECSCUSR`, drawn as geometry in the background pass
+  so the glyph underneath stays readable.
 - **B4. Broadcast input** — send keystrokes to every pane of the active tab.
 - **B5. Tab reorder + move pane between tabs** — drag tabs on the strip; drag a
   pane across the tab boundary.
 
-**Also worth folding in** (cheap, and it unblocks B2): ANSI underline
-(`SGR 4`) — `CellStyle` carries only bold/italic today, so underlined text
-renders plain. Add an `underline` flag to `CellStyle` and map it to
+**Still worth folding in** (cheap): ANSI underline (`SGR 4`) — `CellStyle`
+carries only bold/italic today, so underlined text renders plain. Hyperlinks
+work around it by underlining link cells directly; ordinary `SGR 4` text is
+still plain. Add an `underline` flag to `CellStyle` and map it to
 `Attrs::underline`.
 
 ### Batch C — big rocks
@@ -271,7 +306,7 @@ renders plain. Add an `underline` flag to `CellStyle` and map it to
 
 ```bash
 cd /home/bruce/NeoTerm
-cargo test                      # 31 headless tests, must stay green
+cargo test                      # 41 headless tests, must stay green
 cargo build                     # debug
 cargo build --release           # optimized (LTO, ~8 min)
 ./install.sh                    # release + install to ~/.local

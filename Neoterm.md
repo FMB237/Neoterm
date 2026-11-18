@@ -1,12 +1,12 @@
 # NeoTerm
 
 GPU terminal emulator in pure Rust. Tabs, splits, themes — no toolkit, no C
-dependencies beyond the GPU stack. Currently at **v0.2.0**, installed via
+dependencies beyond the GPU stack. Currently at **v0.3.0**, installed via
 `./install.sh` into `~/.local`.
 
 > `PLAN.md` — continuation brief: what is shipped, the invariants that must
-> not break, and the prioritized backlog (next up: `--working-directory`, bell
-> support, manual tab rename).
+> not break, and the prioritized backlog (next up: broadcast input, tab
+> reorder, then the big rocks).
 
 | Layer | Crate |
 |---|---|
@@ -19,7 +19,7 @@ dependencies beyond the GPU stack. Currently at **v0.2.0**, installed via
 | Config file | serde 1 + toml 0.8, watched with notify 6 |
 | CLI (`-e`, `--version`) | clap 4 |
 
-~5,860 lines across 7 modules, 31 headless unit tests (`cargo test`).
+~6,980 lines across 8 modules, 41 headless unit tests (`cargo test`).
 
 ## Milestones shipped
 
@@ -54,6 +54,13 @@ dependencies beyond the GPU stack. Currently at **v0.2.0**, installed via
   directory, a visual bell (`BEL` tints the body; `bell = "none"` mutes it),
   and manual tab titles (`Ctrl+Shift+R` edits, `Ctrl+Shift+U` releases the
   tab back to its live OSC title).
+- **Batch B (v0.3.0)** — the global UI pass (the cursor is drawn *behind* the
+  glyph, split panes get a focus cue, the tab strip reads as an index badge
+  plus a clean title, and copy/paste report through a pill in the body
+  corner); **scrollback search** (`Ctrl+Shift+F` over history and viewport
+  with live highlighting); **OSC 8 hyperlinks** (link text underlined,
+  `Ctrl+click` opens it); and **cursor styles** (block / underline / beam /
+  hollow block, honoring `DECSCUSR`).
 - **Ship** — versioned binary, `assets/neoterm.desktop` (validated),
   hand-made SVG icon, `install.sh` / `uninstall.sh` (user `~/.local` by
   default, `--system` for `/usr/local`, `PREFIX`/`DESTDIR` honored).
@@ -71,6 +78,8 @@ dependencies beyond the GPU stack. Currently at **v0.2.0**, installed via
 | `Ctrl+Shift+C` / `V` | Copy / paste (never reach the PTY) |
 | `Ctrl+Shift+Plus` / `Minus` / `0` | Font size up / down / reset (session-only) |
 | `Ctrl+Shift+R` / `U` | Rename the active tab (Enter commits, Esc cancels) / release it back to the live title |
+| `Ctrl+Shift+F` | Search scrollback + viewport (`Enter` next, `Shift+Enter` previous, `Esc` closes) |
+| `Ctrl+click` | Open an OSC 8 hyperlink with the system opener |
 | `PageUp/PageDown` (`Shift` forces local) | Scrollback, unless a fullscreen app owns the keys |
 | Double / triple click | Word / line select (400 ms window) |
 | Middle-click | Paste PRIMARY · close tab on the strip · SGR button-1 in mouse apps |
@@ -93,7 +102,8 @@ preset = "tokyo-night"    # tokyo-night | catppuccin-mocha | dracula |
                           # gruvbox-dark | "" for fully custom colors
 # background, foreground, cursor, selection, palette (16 ANSI colors),
 # tab_bar_bg (unset = seamless, follows background), tab_active_fg,
-# tab_inactive_fg, tab_close_fg, scrollbar_track, scrollbar_thumb
+# tab_inactive_fg, tab_close_fg, tab_index_fg, tab_bar_border,
+# tab_active_bg (toast surface), scrollbar_track, scrollbar_thumb
 ```
 
 Notes: `font_family` accepts a comma-separated preference list and uses the
@@ -132,25 +142,28 @@ winit events ──▶ input::map_key ──▶ InputAction ──▶ App (main.
 
 **Module map** (`crates/neoterm/src/`, lines approx):
 
-- `main.rs` (~1570) — `App` event loop, all mouse/keyboard handlers,
+- `main.rs` (~1920) — `App` event loop, all mouse/keyboard handlers,
   draw orchestration, config watcher, strip-visibility reflow, font zoom
-  and grid reflow, visual bell, tab rename mode.
-- `tab.rs` (~1840) — `Pane` (one terminal: PTY, grid, selection, OSC title
+  and grid reflow, visual bell, tab rename mode, the search session and
+  hyperlink opening.
+- `tab.rs` (~1860) — `Pane` (one terminal: PTY, grid, selection, OSC title
   listener), `PaneNode` split tree, pure cell layout (`layout_tree`,
   `focus_neighbor`, `clamp_ratio`), `Tab` container delegating single-pane
   behavior to the focused pane, free `render_term_rows` for headless tests.
-- `renderer.rs` (~1010) — wgpu setup, per-pane text-buffer caches keyed by
+- `renderer.rs` (~1330) — wgpu setup, per-pane text-buffer caches keyed by
   pane id (pruned on close), font-family/glyph-advance probing, pass 1:
   alpha-blended solid rects (strip, accent underline, dividers, cell
-  backgrounds, selection, scrollbar) in linear color, pass 2: shaped text
-  clipped per pane.
-- `tabs.rs` (~240) — tab list, ids, split/close/focus/zoom dispatch,
+  backgrounds, selection, scrollbar, cursor geometry, focus outline, toast)
+  in linear color, pass 2: shaped text clipped per pane.
+- `tabs.rs` (~235) — tab list, ids, split/close/focus/zoom dispatch,
   dead-pane reaping (never respawns; empty list quits the app), title pins.
-- `mouse.rs` (~440) — pure geometry: labels, regions, close/`+` zones,
+- `mouse.rs` (~480) — pure geometry: labels, regions, close/`+` zones,
   scrollbar math, SGR encoding. Clicks always land on what is drawn.
-- `input.rs` (~250) — key event → `InputAction` mapping (`chrome_action`
+- `search.rs` (~345) — pure scrollback search: match list over history and
+  viewport, next/previous with wraparound, case folding. No winit/wgpu.
+- `input.rs` (~260) — key event → `InputAction` mapping (`chrome_action`
   holds the pure shortcut table).
-- `config.rs` (~510) — `NeotermConfig` + `Theme` pack with legacy-tolerant
+- `config.rs` (~550) — `NeotermConfig` + `Theme` pack with legacy-tolerant
   serde defaults, preset application, and sRGB→linear conversion for the
   swapchain.
 
@@ -173,16 +186,16 @@ winit events ──▶ input::map_key ──▶ InputAction ──▶ App (main.
 
 ## Not yet built (roadmap, audited)
 
-**Quick wins** — ~~`--working-directory` CLI flag~~, ~~bell support~~ and
-~~manual tab rename~~ are done (see *Everyday features* above). Still open:
-ANSI underline (`SGR 4` is parsed but not drawn), `--working-directory` for
-*new* tabs (today every tab starts in the launch directory), a bell sound,
-and a themed scrollbar that follows the accent color.
+**In Batch B, still open** — broadcast input to every pane of a tab; tab
+reorder and moving a pane between tabs. Two known fidelity gaps: `SGR 4`
+(plain underline) is parsed but not drawn, and the search session highlights
+matches and scrolls to them but does not draw the typed query yet.
 
-**Medium** — scrollback search (`Ctrl+Shift+F`, match highlights via the
-existing bg-rect pass); hyperlink support (OSC 8, underline + `Ctrl+click`
-to open); cursor styles (block/underline/beam + blink, honoring `DECSCUSR`);
-broadcast input to all panes; tab reorder + moving panes between tabs.
+**Quick wins** — ~~`--working-directory` CLI flag~~, ~~bell support~~,
+~~manual tab rename~~, ~~ANSI underline for hyperlinks~~ and ~~cursor styles~~
+are done. Still open: `--working-directory` for *new* tabs (today every tab
+starts in the launch directory), a bell sound, and a themed scrollbar that
+follows the accent color.
 
 **Big rocks** — multiple OS windows (renderer/window/tabs all assume a
 singleton today); session restore (tabs, panes, cwd, commands); window
@@ -192,7 +205,7 @@ transparency/blur; Vi keyboard selection (copymode); graphics protocols
 ## Verify / build
 
 ```bash
-cargo test                      # 31 headless tests
+cargo test                      # 41 headless tests
 cargo build                     # debug
 cargo build --release           # optimized (LTO, ~8 min)
 ./install.sh                    # release + install to ~/.local
