@@ -79,6 +79,9 @@ struct App {
     rename: Option<RenameState>,
     /// Active scrollback search (Ctrl+Shift+F): query + matches + current.
     search: Option<SearchState>,
+    /// Broadcast input mode: when enabled, keystrokes go to all panes
+    /// in the active tab simultaneously.
+    broadcast: bool,
     // ---- mouse state (Stage 4) ----
     /// Last known cursor position in physical pixels.
     cursor_pos: Option<PhysicalPosition<f64>>,
@@ -105,6 +108,10 @@ struct App {
     /// Divider drag in progress: tab index, tree path, direction, and the
     /// parent span (ratio-invariant, captured at grab time).
     split_drag: Option<SplitDrag>,
+    /// Tab drag in progress: index of tab being dragged.
+    tab_drag: Option<usize>,
+    /// Pane drag in progress: (source tab index, pane id being dragged).
+    pane_drag: Option<(usize, PaneId)>,
     /// Resize cursor currently shown for divider hover/drag.
     split_cursor: Option<CursorIcon>,
 }
@@ -152,6 +159,7 @@ impl App {
             toast: None,
             rename: None,
             search: None,
+            broadcast: false,
             cursor_pos: None,
             selecting: false,
             left_held: false,
@@ -164,6 +172,8 @@ impl App {
             press_pane: None,
             press_local: None,
             split_drag: None,
+            tab_drag: None,
+            pane_drag: None,
             split_cursor: None,
         }
     }
@@ -895,6 +905,8 @@ impl App {
                     tabs.close_at(i, &self.cfg);
                 } else {
                     tabs.select(i);
+                    // Start tab drag (reorder): track which tab we're dragging.
+                    self.tab_drag = Some(i);
                 }
             }
             self.force_draw = true;
@@ -941,6 +953,22 @@ impl App {
                 }
                 self.request_redraw();
                 return;
+            }
+        }
+        // Pane drag: Shift+click on a pane to start dragging it to another tab.
+        // Must be before pane_cell_at check since we need the pane.
+        if self.mods.state().shift_key() {
+            if let Some((pid, _, _, _)) = self.pane_cell_at(pos.x, pos.y) {
+                if let Some(tabs) = self.tabs.as_ref() {
+                    if let Some(tab) = tabs.active() {
+                        if tab.pane(pid).is_some() {
+                            self.pane_drag = Some((tabs.active_index(), pid));
+                            self.force_draw = true;
+                            self.request_redraw();
+                            return;
+                        }
+                    }
+                }
             }
         }
         let Some((pid, col, vrow, side)) = self.pane_cell_at(pos.x, pos.y) else {
@@ -1057,6 +1085,18 @@ impl App {
         }
         // End of a thumb drag (no selection/app-report state was touched).
         if self.scroll_drag.take().is_some() {
+            return;
+        }
+        // End of a tab drag (reorder).
+        if self.tab_drag.take().is_some() {
+            self.force_draw = true;
+            self.request_redraw();
+            return;
+        }
+        // End of a pane drag (move between tabs) - drop without target tab.
+        if self.pane_drag.take().is_some() {
+            self.force_draw = true;
+            self.request_redraw();
             return;
         }
         if self.press_app_mouse {
@@ -1271,6 +1311,67 @@ impl App {
             if drop_drag {
                 self.split_drag = None;
                 self.set_split_cursor(None);
+            }
+            return;
+        }
+        // Tab drag (reorder): track hover over tab bar to reorder tabs.
+        if let Some(drag_idx) = self.tab_drag {
+            if self.strip_on() {
+                let window = self.window.as_ref();
+                let renderer = self.renderer.as_ref();
+                // Get titles and geometry before mutable borrow on tabs.
+                let titles = self.tab_titles();
+                let strip_on = self.strip_on();
+                let scale = window.as_ref().map(|w| w.scale_factor() as f32).unwrap_or(1.0);
+                let g = renderer.as_ref().map(|r| r.body_geometry(scale, strip_on)).unwrap_or((1.0, 1.0, 0.0, 0.0));
+                if (pos.y as f32) < g.3 {
+                    let adv = g.0 / scale.max(f32::EPSILON);
+                    let regions = mouse::tab_regions(&titles, adv, renderer::TAB_LEFT * scale, scale);
+                    if let Some(hover_idx) = mouse::tab_hit(&regions, pos.x as f32) {
+                        if hover_idx != drag_idx {
+                            if let Some(tabs) = self.tabs.as_mut() {
+                                tabs.move_tab(drag_idx, hover_idx);
+                                self.tab_drag = Some(hover_idx);
+                                self.force_draw = true;
+                                self.request_redraw();
+                            }
+                        }
+                    }
+                }
+            }
+            return;
+        }
+        // Pane drag: track hover over tab bar to drop pane into another tab.
+        if let Some((src_tab_idx, pane_id)) = self.pane_drag {
+            if self.strip_on() {
+                let window = self.window.as_ref();
+                let renderer = self.renderer.as_ref();
+                // Get titles and geometry before mutable borrow on tabs.
+                let titles = self.tab_titles();
+                let strip_on = self.strip_on();
+                let scale = window.as_ref().map(|w| w.scale_factor() as f32).unwrap_or(1.0);
+                let g = renderer.as_ref().map(|r| r.body_geometry(scale, strip_on)).unwrap_or((1.0, 1.0, 0.0, 0.0));
+                if (pos.y as f32) < g.3 {
+                    let adv = g.0 / scale.max(f32::EPSILON);
+                    let regions = mouse::tab_regions(&titles, adv, renderer::TAB_LEFT * scale, scale);
+                    if let Some(hover_idx) = mouse::tab_hit(&regions, pos.x as f32) {
+                        if hover_idx != src_tab_idx {
+                            // Move pane from src_tab to hover_tab
+                            if let Some(tabs) = self.tabs.as_mut() {
+                                if let Some(src_tab) = tabs.get_mut(src_tab_idx) {
+                                    if let Some(pane) = src_tab.take_pane(pane_id) {
+                                        if let Some(dst_tab) = tabs.get_mut(hover_idx) {
+                                            dst_tab.add_pane(pane_id, pane, &self.cfg);
+                                        }
+                                    }
+                                }
+                                self.pane_drag = None;
+                                self.force_draw = true;
+                                self.request_redraw();
+                            }
+                        }
+                    }
+                }
             }
             return;
         }
@@ -1508,7 +1609,11 @@ impl ApplicationHandler for App {
                     InputAction::PtyInput(bytes) => {
                         if let Some(tabs) = self.tabs.as_ref() {
                             if let Some(tab) = tabs.active() {
-                                tab.write(&bytes);
+                                if self.broadcast {
+                                    tab.write_all(&bytes);
+                                } else {
+                                    tab.write(&bytes);
+                                }
                             }
                         }
                         if let Some(w) = self.window.as_ref() {
@@ -1589,6 +1694,12 @@ impl ApplicationHandler for App {
                         if !was_pinned {
                             log::info!("tab title was not pinned");
                         }
+                        self.force_draw = true;
+                        self.request_redraw();
+                    }
+                    InputAction::BroadcastToggle => {
+                        self.broadcast = !self.broadcast;
+                        log::info!("broadcast input: {}", if self.broadcast { "on" } else { "off" });
                         self.force_draw = true;
                         self.request_redraw();
                     }

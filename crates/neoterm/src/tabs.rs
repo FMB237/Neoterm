@@ -157,6 +157,23 @@ impl Tabs {
         }
     }
 
+    /// Move tab from `from` index to `to` index (reorder).
+    pub fn move_tab(&mut self, from: usize, to: usize) {
+        if from >= self.tabs.len() || to >= self.tabs.len() || from == to {
+            return;
+        }
+        let tab = self.tabs.remove(from);
+        self.tabs.insert(to, tab);
+        // Update active index if it was affected.
+        if self.active == from {
+            self.active = to;
+        } else if from < self.active && to >= self.active {
+            self.active -= 1;
+        } else if from > self.active && to <= self.active {
+            self.active += 1;
+        }
+    }
+
     pub fn active(&self) -> Option<&Tab> {
         self.tabs.get(self.active)
     }

@@ -42,6 +42,8 @@ pub enum InputAction {
     RenameTab,
     /// Drop the active tab's manual title, back to the live OSC one.
     UnpinTab,
+    /// Toggle broadcast input mode (send keystrokes to all panes).
+    BroadcastToggle,
     Ignored,
 }
 
@@ -153,6 +155,7 @@ fn chrome_action(key: &Key, mods: ModifiersState) -> Option<InputAction> {
                 "0" | ")" => return Some(InputAction::FontZoomReset),
                 "R" => return Some(InputAction::RenameTab),
                 "U" => return Some(InputAction::UnpinTab),
+                "B" => return Some(InputAction::BroadcastToggle),
                 _ => {}
             },
             Key::Named(NamedKey::Tab) => return Some(InputAction::NextTab),

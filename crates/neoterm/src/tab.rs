@@ -1045,6 +1045,49 @@ impl Tab {
         true
     }
 
+    /// Take ownership of a pane, removing it from this tab.
+    /// Returns the pane and its rect in the layout, or None if not found.
+    pub fn take_pane(&mut self, id: PaneId) -> Option<Pane> {
+        if let Some(root) = self.root.take() {
+            self.root = PaneNode::remove_leaf(root, id);
+        }
+        let pane = self.panes.remove(&id);
+        self.sizes.remove(&id);
+        if self.zoomed == Some(id) {
+            self.zoomed = None;
+        }
+        // Fix focus if it was on the removed pane.
+        if self.active == id {
+            self.active = self
+                .root
+                .as_ref()
+                .and_then(|r| r.first_leaf())
+                .unwrap_or(0);
+        }
+        pane
+    }
+
+    /// Add a pane to this tab (as a new split or standalone if empty).
+    pub fn add_pane(&mut self, id: PaneId, pane: Pane, _cfg: &NeotermConfig) {
+        self.panes.insert(id, pane);
+        if let Some(root) = self.root.as_mut() {
+            root.replace_leaf(
+                self.active,
+                PaneNode::Split {
+                    dir: SplitDir::V,
+                    ratio: 0.5,
+                    first: Box::new(PaneNode::Leaf(self.active)),
+                    second: Box::new(PaneNode::Leaf(id)),
+                },
+            );
+        } else {
+            self.root = Some(PaneNode::Leaf(id));
+        }
+        self.active = id;
+        let (cols, rows) = (self.area.cols, self.area.rows);
+        self.resize_body(cols, rows);
+    }
+
     /// Move focus to the neighboring pane (unzooms first if needed).
     pub fn focus(&mut self, dir: FocusDir) -> bool {
         // Focus while zoomed: unzoom so the target is visible.
@@ -1110,6 +1153,13 @@ impl Tab {
 impl Tab {
     pub fn write(&self, bytes: &[u8]) {
         if let Some(p) = self.active_pane() {
+            p.write(bytes);
+        }
+    }
+
+    /// Write bytes to all panes in this tab (broadcast).
+    pub fn write_all(&self, bytes: &[u8]) {
+        for p in self.panes.values() {
             p.write(bytes);
         }
     }
