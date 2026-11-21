@@ -472,7 +472,7 @@ impl Renderer {
     }
 
     /// Build a cosmic-text attrs list for one row: default fg + per-span
-    /// overrides (color, bold, italic) in the configured family.
+    /// overrides (color, bold, italic, underline) in the configured family.
     fn row_attrs(defaults: &Attrs, family: Family<'_>, row: &RowContent) -> AttrsList {
         let mut list = AttrsList::new(defaults);
         for (range, style) in &row.spans {
@@ -483,6 +483,9 @@ impl Renderer {
             }
             if style.italic {
                 attrs = attrs.style(Style::Italic);
+            }
+            if style.underline {
+                attrs = attrs.underline(UnderlineStyle::Single);
             }
             if style.hyperlink.is_some() {
                 attrs = attrs.underline(UnderlineStyle::Single);

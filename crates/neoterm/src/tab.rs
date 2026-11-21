@@ -1357,6 +1357,7 @@ pub fn render_term_rows(
                 let cell = &grid[line][Column(col_idx)];
                 let bold = cell.flags.contains(Flags::BOLD);
                 let italic = cell.flags.contains(Flags::ITALIC);
+                let underline = cell.flags.contains(Flags::UNDERLINE);
                 let dim = cell.flags.contains(Flags::DIM);
                 let mut fg =
                     resolve_color(cell.fg, colors, true, bold, dim, default_fg, default_bg, palette);
@@ -1395,6 +1396,7 @@ pub fn render_term_rows(
                         bg,
                         bold,
                         italic,
+                        underline,
                         hyperlink: cell.hyperlink().map(|h| h.uri().to_string()),
                     },
                 ));
@@ -1457,12 +1459,14 @@ pub fn render_term_rows(
 /// `bg` is resolved for INVERSE handling and future per-cell background
 /// rects. Selection backgrounds are drawn by the renderer's rect pass.
 /// `hyperlink` holds the OSC 8 URI when this cell is a hyperlink target.
+/// `underline` tracks the SGR 4 underline style (Single/Double).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct CellStyle {
     pub fg: (u8, u8, u8),
     pub bg: (u8, u8, u8),
     pub bold: bool,
     pub italic: bool,
+    pub underline: bool,
     pub hyperlink: Option<String>,
 }
 
