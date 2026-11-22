@@ -7,9 +7,11 @@ use alacritty_terminal::term::{
     Config as TermConfig, Term, TermDamage, TermMode,
 };
 use alacritty_terminal::selection::{Selection, SelectionRange, SelectionType};
-use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedColor, Rgb};
+use alacritty_terminal::vte::ansi::{self, Color as AnsiColor, CursorShape, NamedColor, Rgb};
+use alacritty_terminal::vte::Params;
 use anyhow::{Context, Result};
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
+use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -21,6 +23,7 @@ use winit::event_loop::EventLoopProxy;
 use std::collections::HashMap;
 
 use crate::config::NeotermConfig;
+use crate::graphics::{GraphicsProtocol, GraphicsState, SharedGraphicsState, new_shared_graphics_state};
 use crate::input::FocusDir;
 
 /// Dimensions adapter for alacritty_terminal.
@@ -151,6 +154,10 @@ pub struct Pane {
     /// Last cursor position seen by `take_damage` (stale-cursor detection:
     /// cursor-only moves don't always mark grid damage).
     last_cursor: Mutex<(usize, usize)>,
+    /// Current working directory of the shell (for session restore).
+    cwd: PathBuf,
+    /// Graphics state for Sixel/Kitty protocol support.
+    graphics: SharedGraphicsState,
 }
 
 impl Pane {
@@ -208,6 +215,9 @@ impl Pane {
         let term_clone = Arc::clone(&term);
         let dirty_clone = Arc::clone(&dirty);
         let dead_clone = Arc::clone(&dead);
+        // Create graphics state before spawning reader thread so we can capture it
+        let graphics = new_shared_graphics_state();
+        let graphics_clone = Arc::clone(&graphics);
         thread::spawn(move || {
             let mut processor: vte::ansi::Processor = Default::default();
             let mut buf = [0u8; 8192];
@@ -224,8 +234,10 @@ impl Pane {
                         break;
                     }
                     Ok(n) => {
+                        // Preprocess graphics escape sequences (Sixel/Kitty)
+                        let processed = crate::graphics::preprocess_graphics(&buf[..n], &graphics_clone);
                         if let Ok(mut t) = term_clone.lock() {
-                            processor.advance(&mut *t, &buf[..n]);
+                            processor.advance(&mut *t, &processed);
                         }
                         if !dirty_clone.swap(true, Ordering::Relaxed) {
                             let _ = proxy.send_event(());
@@ -253,6 +265,8 @@ impl Pane {
             bell,
             palette: cfg.theme.palette_rgb(),
             last_cursor: Mutex::new((0, 0)),
+            cwd: cwd.to_path_buf(),
+            graphics,
         })
     }
 
@@ -267,6 +281,16 @@ impl Pane {
             .lock()
             .map(|t| t.clone())
             .unwrap_or_default()
+    }
+
+    /// Current working directory of the shell (for session restore).
+    pub fn get_cwd(&self) -> PathBuf {
+        self.cwd.clone()
+    }
+
+    /// Get the graphics state for Sixel/Kitty protocol support.
+    pub fn graphics(&self) -> &SharedGraphicsState {
+        &self.graphics
     }
 
     pub fn write(&self, bytes: &[u8]) {
@@ -496,7 +520,7 @@ pub const MIN_PANE_COLS: usize = 15;
 pub const MIN_PANE_ROWS: usize = 4;
 
 /// Split direction: V = side-by-side (1-column divider), H = stacked.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SplitDir {
     V,
     H,
@@ -878,6 +902,41 @@ impl Tab {
         self.panes.get(&id)
     }
 
+    /// Get all panes.
+    pub fn panes(&self) -> &HashMap<PaneId, Pane> {
+        &self.panes
+    }
+
+    /// Get all pane sizes.
+    pub fn sizes(&self) -> &HashMap<PaneId, (usize, usize)> {
+        &self.sizes
+    }
+
+    /// Get the root of the pane tree.
+    pub fn root(&self) -> &Option<PaneNode> {
+        &self.root
+    }
+
+    /// Get the tab ID.
+    pub fn tab_id(&self) -> usize {
+        self.tab_id
+    }
+
+    /// Get the pinned title.
+    pub fn pinned_title(&self) -> Option<&String> {
+        self.pinned_title.as_ref()
+    }
+
+    /// Get the active pane ID.
+    pub fn active_pane_id(&self) -> PaneId {
+        self.active
+    }
+
+    /// Get the zoomed pane ID.
+    pub fn zoomed_pane_id(&self) -> Option<PaneId> {
+        self.zoomed
+    }
+
     /// Current layout over the stored body area (zoom honored).
     pub fn layout(&self) -> PaneLayout {
         match &self.root {
@@ -1147,6 +1206,39 @@ impl Tab {
     }
 }
 
+/// Session restore methods for Tab.
+impl Tab {
+    /// Set the pinned title.
+    pub fn set_pinned_title(&mut self, title: Option<String>) {
+        self.pinned_title = title;
+    }
+
+    /// Set the active pane ID.
+    pub fn set_active_pane_id(&mut self, id: PaneId) {
+        self.active = id;
+    }
+
+    /// Set the zoomed pane ID.
+    pub fn set_zoomed_pane_id(&mut self, id: Option<PaneId>) {
+        self.zoomed = id;
+    }
+
+    /// Replace all panes (used during session restore).
+    pub fn replace_panes(&mut self, panes: HashMap<PaneId, Pane>) {
+        self.panes = panes;
+    }
+
+    /// Replace all pane sizes (used during session restore).
+    pub fn replace_sizes(&mut self, sizes: HashMap<PaneId, (usize, usize)>) {
+        self.sizes = sizes;
+    }
+
+    /// Replace the root of the pane tree (used during session restore).
+    pub fn replace_root(&mut self, root: Option<PaneNode>) {
+        self.root = root;
+    }
+}
+
 // ---- Tab accessors: single-pane behavior delegates to the active pane,
 // so mouse/keyboard/scroll/copy paths in main.rs are pane-aware for free.
 
@@ -1357,6 +1449,7 @@ pub fn render_term_rows(
                 let cell = &grid[line][Column(col_idx)];
                 let bold = cell.flags.contains(Flags::BOLD);
                 let italic = cell.flags.contains(Flags::ITALIC);
+                let underline = cell.flags.contains(Flags::UNDERLINE);
                 let dim = cell.flags.contains(Flags::DIM);
                 let mut fg =
                     resolve_color(cell.fg, colors, true, bold, dim, default_fg, default_bg, palette);
@@ -1395,6 +1488,7 @@ pub fn render_term_rows(
                         bg,
                         bold,
                         italic,
+                        underline,
                         hyperlink: cell.hyperlink().map(|h| h.uri().to_string()),
                     },
                 ));
@@ -1457,12 +1551,14 @@ pub fn render_term_rows(
 /// `bg` is resolved for INVERSE handling and future per-cell background
 /// rects. Selection backgrounds are drawn by the renderer's rect pass.
 /// `hyperlink` holds the OSC 8 URI when this cell is a hyperlink target.
+/// `underline` tracks the SGR 4 underline style (Single/Double).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct CellStyle {
     pub fg: (u8, u8, u8),
     pub bg: (u8, u8, u8),
     pub bold: bool,
     pub italic: bool,
+    pub underline: bool,
     pub hyperlink: Option<String>,
 }
 

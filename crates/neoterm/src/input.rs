@@ -44,6 +44,26 @@ pub enum InputAction {
     UnpinTab,
     /// Toggle broadcast input mode (send keystrokes to all panes).
     BroadcastToggle,
+    /// Create a new OS window.
+    NewWindow,
+    /// Toggle Vi-style copy mode (Ctrl+Shift+Space).
+    CopymodeToggle,
+    /// Copymode navigation (only active in copymode).
+    CopymodeUp,
+    CopymodeDown,
+    CopymodeLeft,
+    CopymodeRight,
+    CopymodePageUp,
+    CopymodePageDown,
+    CopymodeHome,
+    CopymodeEnd,
+    /// Start/extend selection in copymode (v/V).
+    CopymodeSelect,
+    CopymodeSelectLine,
+    /// Copy selection and exit copymode (y).
+    CopymodeCopy,
+    /// Exit copymode without copying (Escape, q, Ctrl+C).
+    CopymodeExit,
     Ignored,
 }
 
@@ -82,15 +102,62 @@ pub fn map_key(event: &KeyEvent, mods: &Modifiers, alt_screen: bool) -> InputAct
         Key::Named(NamedKey::Backspace) => return InputAction::PtyInput(vec![0x7f]),
         Key::Named(NamedKey::Tab) => return InputAction::PtyInput(vec![b'\t']),
         Key::Named(NamedKey::Escape) => return InputAction::PtyInput(vec![0x1b]),
-        Key::Named(NamedKey::ArrowUp) => return InputAction::PtyInput(b"\x1b[A".to_vec()),
-        Key::Named(NamedKey::ArrowDown) => return InputAction::PtyInput(b"\x1b[B".to_vec()),
-        Key::Named(NamedKey::ArrowRight) => return InputAction::PtyInput(b"\x1b[C".to_vec()),
-        Key::Named(NamedKey::ArrowLeft) => return InputAction::PtyInput(b"\x1b[D".to_vec()),
-        Key::Named(NamedKey::Home) => return InputAction::PtyInput(b"\x1b[H".to_vec()),
-        Key::Named(NamedKey::End) => return InputAction::PtyInput(b"\x1b[F".to_vec()),
+        Key::Named(NamedKey::ArrowUp) => {
+            if !alt_screen {
+                if let Some(action) = copymode_key(&Key::Named(NamedKey::ArrowUp)) {
+                    return action;
+                }
+            }
+            return InputAction::PtyInput(b"\x1b[A".to_vec());
+        }
+        Key::Named(NamedKey::ArrowDown) => {
+            if !alt_screen {
+                if let Some(action) = copymode_key(&Key::Named(NamedKey::ArrowDown)) {
+                    return action;
+                }
+            }
+            return InputAction::PtyInput(b"\x1b[B".to_vec());
+        }
+        Key::Named(NamedKey::ArrowRight) => {
+            if !alt_screen {
+                if let Some(action) = copymode_key(&Key::Named(NamedKey::ArrowRight)) {
+                    return action;
+                }
+            }
+            return InputAction::PtyInput(b"\x1b[C".to_vec());
+        }
+        Key::Named(NamedKey::ArrowLeft) => {
+            if !alt_screen {
+                if let Some(action) = copymode_key(&Key::Named(NamedKey::ArrowLeft)) {
+                    return action;
+                }
+            }
+            return InputAction::PtyInput(b"\x1b[D".to_vec());
+        }
+        Key::Named(NamedKey::Home) => {
+            if !alt_screen {
+                if let Some(action) = copymode_key(&Key::Named(NamedKey::Home)) {
+                    return action;
+                }
+            }
+            return InputAction::PtyInput(b"\x1b[H".to_vec());
+        }
+        Key::Named(NamedKey::End) => {
+            if !alt_screen {
+                if let Some(action) = copymode_key(&Key::Named(NamedKey::End)) {
+                    return action;
+                }
+            }
+            return InputAction::PtyInput(b"\x1b[F".to_vec());
+        }
         Key::Named(NamedKey::PageUp) => {
             if alt_screen && !shift {
                 return InputAction::PtyInput(b"\x1b[5~".to_vec());
+            }
+            if !alt_screen {
+                if let Some(action) = copymode_key(&Key::Named(NamedKey::PageUp)) {
+                    return action;
+                }
             }
             return InputAction::ScrollPageUp;
         }
@@ -98,9 +165,19 @@ pub fn map_key(event: &KeyEvent, mods: &Modifiers, alt_screen: bool) -> InputAct
             if alt_screen && !shift {
                 return InputAction::PtyInput(b"\x1b[6~".to_vec());
             }
+            if !alt_screen {
+                if let Some(action) = copymode_key(&Key::Named(NamedKey::PageDown)) {
+                    return action;
+                }
+            }
             return InputAction::ScrollPageDown;
         }
         Key::Named(NamedKey::Delete) => return InputAction::PtyInput(b"\x1b[3~".to_vec()),
+        Key::Character(s) if !alt_screen && (s == "v" || s == "V" || s == "y") => {
+            if let Some(action) = copymode_key(&Key::Character(s.clone())) {
+                return action;
+            }
+        }
         _ => {}
     }
 
@@ -131,7 +208,7 @@ pub fn map_key(event: &KeyEvent, mods: &Modifiers, alt_screen: bool) -> InputAct
 ///
 /// NOTE: Ctrl+Shift+C/V never reach the PTY (unlike Ctrl+C = SIGINT).
 /// This matches GNOME Terminal / Alacritty behavior.
-fn chrome_action(key: &Key, mods: ModifiersState) -> Option<InputAction> {
+pub fn chrome_action(key: &Key, mods: ModifiersState) -> Option<InputAction> {
     let ctrl = mods.control_key();
     let shift = mods.shift_key();
 
@@ -140,7 +217,7 @@ fn chrome_action(key: &Key, mods: ModifiersState) -> Option<InputAction> {
             Key::Character(s) => match s.to_uppercase().as_str() {
                 "T" => return Some(InputAction::NewTab),
                 "W" => return Some(InputAction::ClosePane),
-                "N" => return Some(InputAction::NextTab),
+                "N" => return Some(InputAction::NewWindow),
                 "P" => return Some(InputAction::PrevTab),
                 "C" => return Some(InputAction::Copy),
                 "V" => return Some(InputAction::Paste),
@@ -156,6 +233,7 @@ fn chrome_action(key: &Key, mods: ModifiersState) -> Option<InputAction> {
                 "R" => return Some(InputAction::RenameTab),
                 "U" => return Some(InputAction::UnpinTab),
                 "B" => return Some(InputAction::BroadcastToggle),
+                " " => return Some(InputAction::CopymodeToggle),
                 _ => {}
             },
             Key::Named(NamedKey::Tab) => return Some(InputAction::NextTab),
@@ -193,6 +271,27 @@ fn chrome_action(key: &Key, mods: ModifiersState) -> Option<InputAction> {
         }
     }
     None
+}
+
+/// Copymode navigation keys (no modifiers - only active when copymode is on).
+/// These are mapped by `map_key` when `alt_screen` is false to ensure
+/// they don't reach the PTY. The copymode handler in main.rs intercepts
+/// them first when `ws.copymode.is_some()`.
+fn copymode_key(key: &Key) -> Option<InputAction> {
+    match key {
+        Key::Named(NamedKey::ArrowUp) => Some(InputAction::CopymodeUp),
+        Key::Named(NamedKey::ArrowDown) => Some(InputAction::CopymodeDown),
+        Key::Named(NamedKey::ArrowLeft) => Some(InputAction::CopymodeLeft),
+        Key::Named(NamedKey::ArrowRight) => Some(InputAction::CopymodeRight),
+        Key::Named(NamedKey::PageUp) => Some(InputAction::CopymodePageUp),
+        Key::Named(NamedKey::PageDown) => Some(InputAction::CopymodePageDown),
+        Key::Named(NamedKey::Home) => Some(InputAction::CopymodeHome),
+        Key::Named(NamedKey::End) => Some(InputAction::CopymodeEnd),
+        Key::Character(s) if s == "v" => Some(InputAction::CopymodeSelect),
+        Key::Character(s) if s == "V" => Some(InputAction::CopymodeSelectLine),
+        Key::Character(s) if s == "y" => Some(InputAction::CopymodeCopy),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

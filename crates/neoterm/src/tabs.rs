@@ -213,6 +213,21 @@ impl Tabs {
         self.tabs.len()
     }
 
+    /// Iterate over all tabs.
+    pub fn iter_tabs(&self) -> std::slice::Iter<'_, Tab> {
+        self.tabs.iter()
+    }
+
+    /// Iterate over all tabs mutably.
+    pub fn iter_tabs_mut(&mut self) -> std::slice::IterMut<'_, Tab> {
+        self.tabs.iter_mut()
+    }
+
+    /// Get a mutable reference to a tab by index.
+    pub fn get_tab_mut(&mut self, idx: usize) -> Option<&mut Tab> {
+        self.tabs.get_mut(idx)
+    }
+
     pub fn titles(&self) -> Vec<String> {
         self.tabs.iter().map(|t| t.title()).collect()
     }

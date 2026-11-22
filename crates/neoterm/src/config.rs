@@ -302,6 +302,14 @@ pub struct NeotermConfig {
     /// Terminal bell: `"visual"` flashes the body, `"none"` ignores BEL.
     #[serde(default = "default_bell")]
     pub bell: String,
+    /// Window transparency: 0.0 = opaque, 1.0 = fully transparent.
+    /// Requires compositor support. Default 0.0 (opaque).
+    #[serde(default)]
+    pub transparency: f32,
+    /// Window blur behind: `"none"`, `"acrylic"` (Windows/macOS),
+    /// `"blur"` (KDE/Wayland), or `"auto"`. Default "none".
+    #[serde(default = "default_blur")]
+    pub blur: String,
     pub theme: Theme,
 }
 
@@ -311,6 +319,10 @@ fn default_tab_bar() -> String {
 
 fn default_bell() -> String {
     "visual".to_string()
+}
+
+fn default_blur() -> String {
+    "none".to_string()
 }
 
 impl Default for NeotermConfig {
@@ -324,6 +336,8 @@ impl Default for NeotermConfig {
             shell: std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string()),
             tab_bar: default_tab_bar(),
             bell: default_bell(),
+            transparency: 0.0,
+            blur: default_blur(),
             theme: Theme::default(),
         }
     }

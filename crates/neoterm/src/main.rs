@@ -1,11 +1,14 @@
 mod config;
+mod graphics;
 mod input;
 mod mouse;
 mod renderer;
 mod search;
+mod session;
 mod tab;
 mod tabs;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -24,12 +27,51 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy}
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{CursorIcon, Window, WindowId};
 
+// Platform-specific window attributes for transparency/blur
+#[cfg(target_os = "windows")]
+use winit::platform::windows::WindowAttributesExtWindows;
+#[cfg(target_os = "macos")]
+use winit::platform::macos::WindowAttributesExtMacOS;
+
 use config::NeotermConfig;
 use input::InputAction;
 use renderer::{PaneDraw, Renderer, ScrollState};
+use tab::Tab;
 use search::{SearchMatch, SearchState};
+use session::{build_session_state, restore_session_state, session_file_path, SessionState};
 use tab::{CellRect, PaneId, SplitDir};
 use tabs::Tabs;
+
+/// Apply transparency and blur settings to window attributes.
+fn apply_window_effects(attrs: winit::window::WindowAttributes, cfg: &NeotermConfig) -> winit::window::WindowAttributes {
+    let mut attrs = attrs;
+    
+    // Apply transparency (0.0 = opaque, >0 = transparent)
+    if cfg.transparency > 0.0 {
+        attrs = attrs.with_transparent(true);
+    }
+    
+    // Apply blur effect based on platform and config
+    if cfg.blur != "none" {
+        #[cfg(target_os = "windows")]
+        {
+            if cfg.blur == "acrylic" || cfg.blur == "auto" {
+                // Windows 11 acrylic blur
+                attrs = attrs.with_blur_behind(true);
+            }
+        }
+        #[cfg(target_os = "macos")]
+        {
+            if cfg.blur == "acrylic" || cfg.blur == "auto" {
+                // macOS vibrancy/blur
+                attrs = attrs.with_titlebar_transparent(true);
+                // Note: Full window vibrancy requires additional NSView setup
+            }
+        }
+    }
+    
+    attrs
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "neoterm", version, about = "NeoTerm v0.3 - GPU terminal")]
@@ -43,10 +85,45 @@ struct Args {
     working_directory: Option<PathBuf>,
 }
 
+/// Per-window state for multiple window support.
+struct WindowState {
+    window: Arc<Window>,
+    renderer: Renderer,
+    tabs: Tabs,
+    // Per-window UI state
+    last_titles: Vec<String>,
+    last_active: usize,
+    blink_timer: Instant,
+    blink_on: bool,
+    last_blink_state: bool,
+    force_draw: bool,
+    last_strip: bool,
+    bell_flash_until: Option<Instant>,
+    toast: Option<(String, Instant)>,
+    rename: Option<RenameState>,
+    search: Option<SearchState>,
+    copymode: Option<CopymodeState>,
+    broadcast: bool,
+    // Mouse state
+    cursor_pos: Option<PhysicalPosition<f64>>,
+    selecting: bool,
+    left_held: bool,
+    press_app_mouse: bool,
+    anchor: Option<(PaneId, i32, usize)>,
+    click_count: u32,
+    last_click_at: Instant,
+    scroll_drag: Option<f32>,
+    press_app_middle: bool,
+    press_pane: Option<PaneId>,
+    press_local: Option<(usize, usize)>,
+    split_drag: Option<SplitDrag>,
+    tab_drag: Option<usize>,
+    pane_drag: Option<(usize, PaneId)>,
+    split_cursor: Option<CursorIcon>,
+}
+
 struct App {
-    window: Option<Arc<Window>>,
-    renderer: Option<Renderer>,
-    tabs: Option<Tabs>,
+    windows: HashMap<WindowId, WindowState>,
     cfg: NeotermConfig,
     /// Directory every shell starts in (from `--working-directory`, else
     /// `$HOME`). Launch-time only: a config reload never moves the shell.
@@ -57,63 +134,15 @@ struct App {
     mods: Modifiers,
     config_rx: Option<std::sync::mpsc::Receiver<()>>,
     _watcher: Option<notify::RecommendedWatcher>,
-    blink_on: bool,
-    last_blink: Instant,
     proxy: EventLoopProxy<()>,
-    // Redraw decision cache: skip present when nothing changed.
-    last_titles: Vec<String>,
-    last_active: usize,
-    last_blink_on: bool,
-    force_draw: bool,
-    /// Last seen strip visibility (drives grid reflow on show/hide).
-    last_strip: bool,
     /// Long-lived clipboard handle. On X11 the clipboard content is hosted
     /// by our process, so this is kept alive for the whole session instead
     /// of opening/closing per operation.
     clipboard: Option<Clipboard>,
-    /// Visual bell: the body flashes until this instant.
-    bell_flash_until: Option<Instant>,
-    /// Copy/paste confirmation shown in the tab strip.
-    toast: Option<(String, Instant)>,
-    /// In-progress tab rename (Ctrl+Shift+R): the text being edited.
-    rename: Option<RenameState>,
-    /// Active scrollback search (Ctrl+Shift+F): query + matches + current.
-    search: Option<SearchState>,
-    /// Broadcast input mode: when enabled, keystrokes go to all panes
-    /// in the active tab simultaneously.
-    broadcast: bool,
-    // ---- mouse state (Stage 4) ----
-    /// Last known cursor position in physical pixels.
-    cursor_pos: Option<PhysicalPosition<f64>>,
-    /// Local drag-selection in progress.
-    selecting: bool,
-    /// Left button currently held.
-    left_held: bool,
-    /// Current press was forwarded to the app (mouse-reporting mode).
-    press_app_mouse: bool,
-    /// Selection anchor as (pane, grid_line, col) for click-vs-drag detection.
-    anchor: Option<(PaneId, i32, usize)>,
-    /// Consecutive clicks on the same cell (1/2/3 = char/word/line).
-    click_count: u32,
-    last_click_at: Instant,
-    /// Thumb drag in progress: distance from thumb top where grabbed.
-    /// (Verified against live geometry each motion, so no stale rects.)
-    scroll_drag: Option<f32>,
-    /// A middle-button press was forwarded to the app (mouse-reporting mode).
-    press_app_middle: bool,
-    /// Pane + pane-local cell of the current mouse press (selection and
-    /// app-report release paths stay in the press pane across panes).
-    press_pane: Option<PaneId>,
-    press_local: Option<(usize, usize)>,
-    /// Divider drag in progress: tab index, tree path, direction, and the
-    /// parent span (ratio-invariant, captured at grab time).
-    split_drag: Option<SplitDrag>,
-    /// Tab drag in progress: index of tab being dragged.
-    tab_drag: Option<usize>,
-    /// Pane drag in progress: (source tab index, pane id being dragged).
-    pane_drag: Option<(usize, PaneId)>,
-    /// Resize cursor currently shown for divider hover/drag.
-    split_cursor: Option<CursorIcon>,
+    /// Whether a session was loaded and should be saved on exit.
+    session_loaded: bool,
+    /// Loaded session state to restore in `resumed`.
+    pending_session: Option<SessionState>,
 }
 
 /// Divider drag state. The parent rect never changes under ratio changes,
@@ -134,47 +163,34 @@ struct RenameState {
     fresh: bool,
 }
 
+/// Vi-style copy mode state.
+struct CopymodeState {
+    /// Origin pane and cursor position when entering copymode.
+    pane: PaneId,
+    /// Cursor position within the grid (row from top of viewport, col).
+    cursor: (usize, usize),
+    /// Selection anchor (row, col) if selecting, else None.
+    anchor: Option<(usize, usize)>,
+    /// Whether we're in line selection mode (V).
+    line_mode: bool,
+    /// Scroll offset from top of history (0 = viewport bottom).
+    scroll_offset: usize,
+}
+
 impl App {
     fn new(cfg: NeotermConfig, proxy: EventLoopProxy<()>, cwd: PathBuf) -> Self {
         Self {
-            window: None,
-            renderer: None,
-            tabs: None,
+            windows: HashMap::new(),
             cfg,
             cwd,
             font_override: None,
             mods: Modifiers::default(),
             config_rx: None,
             _watcher: None,
-            blink_on: true,
-            last_blink: Instant::now(),
             proxy,
-            last_titles: Vec::new(),
-            last_active: usize::MAX,
-            last_blink_on: false,
-            force_draw: true, // ensure first paint
-            last_strip: true,
             clipboard: None,
-            bell_flash_until: None,
-            toast: None,
-            rename: None,
-            search: None,
-            broadcast: false,
-            cursor_pos: None,
-            selecting: false,
-            left_held: false,
-            press_app_mouse: false,
-            anchor: None,
-            click_count: 0,
-            last_click_at: Instant::now(),
-            scroll_drag: None,
-            press_app_middle: false,
-            press_pane: None,
-            press_local: None,
-            split_drag: None,
-            tab_drag: None,
-            pane_drag: None,
-            split_cursor: None,
+            session_loaded: false,
+            pending_session: None,
         }
     }
 
@@ -193,292 +209,7 @@ impl App {
         self.clipboard.as_mut()
     }
 
-    fn do_copy(&mut self) {
-        let text = match self.tabs.as_ref().and_then(|t| t.active()) {
-            Some(tab) => match tab.copy_text() {
-                Some(s) => s,
-                None => return,
-            },
-            None => return,
-        };
-        let chars = text.chars().count();
-        match self.clipboard() {
-            Some(cb) => {
-                if let Err(e) = cb.set_text(text) {
-                    log::error!("copy failed: {e}");
-                    return;
-                }
-                self.set_toast(format!("copied \u{00b7} {chars} chars"));
-            }
-            None => log::error!("copy failed: no clipboard"),
-        }
-    }
-
-    fn do_paste(&mut self) {
-        let text = match self.clipboard() {
-            Some(cb) => match cb.get_text() {
-                Ok(s) => s,
-                Err(e) => {
-                    log::error!("paste failed: {e}");
-                    return;
-                }
-            },
-            None => return,
-        };
-        let chars = text.chars().count();
-        self.write_paste(text);
-        self.set_toast(format!("pasted \u{00b7} {chars} chars"));
-    }
-
-    /// X11 middle-click: paste the PRIMARY selection buffer.
-    fn do_paste_primary(&mut self) {
-        let text = match self.clipboard() {
-            Some(cb) => match cb.get().clipboard(LinuxClipboardKind::Primary).text() {
-                Ok(s) => s,
-                Err(e) => {
-                    log::error!("primary paste failed: {e}");
-                    return;
-                }
-            },
-            None => return,
-        };
-        let chars = text.chars().count();
-        self.write_paste(text);
-        self.set_toast(format!("pasted \u{00b7} {chars} chars"));
-    }
-
-    /// X11 select-to-copy: mirror the active selection into PRIMARY so
-    /// middle-click pastes it anywhere on the desktop.
-    fn copy_primary(&mut self) {
-        let has_sel = self
-            .tabs
-            .as_ref()
-            .and_then(|t| t.active())
-            .map(|tab| tab.has_selection())
-            .unwrap_or(false);
-        if !has_sel {
-            return;
-        }
-        let text = match self
-            .tabs
-            .as_ref()
-            .and_then(|t| t.active())
-            .and_then(|tab| tab.copy_text())
-        {
-            Some(s) => s,
-            None => return,
-        };
-        let chars = text.chars().count();
-        match self.clipboard() {
-            Some(cb) => {
-                if let Err(e) = cb
-                    .set()
-                    .clipboard(LinuxClipboardKind::Primary)
-                    .text(text)
-                {
-                    log::error!("primary copy failed: {e}");
-                    return;
-                }
-                self.set_toast(format!("copied \u{00b7} {chars} chars"));
-            }
-            None => log::error!("primary copy failed: no clipboard"),
-        }
-    }
-
-    // ============================== search ==============================
-
-    /// Open a fresh search on the focused pane, or close an existing one.
-    fn toggle_search(&mut self) {
-        if self.search.is_some() {
-            self.search = None;
-            self.force_draw = true;
-            self.request_redraw();
-            return;
-        }
-        let Some(tab) = self.tabs.as_ref().and_then(|t| t.active()) else {
-            return;
-        };
-        let id = tab.active_id();
-        let Some(pane) = tab.pane(id) else {
-            return;
-        };
-        // Lock the term briefly to run an empty initial scan (builds the
-        // match list for the current grid content). The query is empty, so
-        // no matches are reported yet; typing populates them.
-        let term = match pane.term.lock() {
-            Ok(t) => t,
-            Err(_) => return,
-        };
-        self.search = Some(SearchState::new(String::new()));
-        // Run an initial pass so the state is tied to the current term.
-        drop(term);
-        self.force_draw = true;
-        self.request_redraw();
-    }
-
-    /// Close the active search.
-    fn search_cancel(&mut self) {
-        if self.search.is_some() {
-            self.search = None;
-            self.force_draw = true;
-            self.request_redraw();
-        }
-    }
-
-    /// Advance to the next match and scroll the focused pane to it.
-    fn search_next(&mut self) {
-        let (id, m) = {
-            let Some(tab) = self.tabs.as_mut().and_then(|t| t.active_mut()) else {
-                return;
-            };
-            let id = tab.active_id();
-            let Some(pane) = tab.pane(id) else {
-                return;
-            };
-            let Some(state) = self.search.as_mut() else {
-                return;
-            };
-            let term = match pane.term.lock() {
-                Ok(t) => t,
-                Err(_) => return,
-            };
-            state.search(&term);
-            drop(term);
-            let Some(m) = state.next_match() else {
-                return;
-            };
-            (id, m)
-        };
-        let Some(tab) = self.tabs.as_mut().and_then(|t| t.active_mut()) else {
-            return;
-        };
-        Self::scroll_pane_to_match(tab, id, &m);
-        self.force_draw = true;
-        self.request_redraw();
-    }
-
-    /// Advance to the previous match and scroll the focused pane to it.
-    fn search_prev(&mut self) {
-        let (id, m) = {
-            let Some(tab) = self.tabs.as_mut().and_then(|t| t.active_mut()) else {
-                return;
-            };
-            let id = tab.active_id();
-            let Some(pane) = tab.pane(id) else {
-                return;
-            };
-            let Some(state) = self.search.as_mut() else {
-                return;
-            };
-            let term = match pane.term.lock() {
-                Ok(t) => t,
-                Err(_) => return,
-            };
-            state.search(&term);
-            drop(term);
-            let Some(m) = state.prev_match() else {
-                return;
-            };
-            (id, m)
-        };
-        let Some(tab) = self.tabs.as_mut().and_then(|t| t.active_mut()) else {
-            return;
-        };
-        Self::scroll_pane_to_match(tab, id, &m);
-        self.force_draw = true;
-        self.request_redraw();
-    }
-
-    /// Scroll the focused pane so `match`'s grid line lands inside the
-    /// viewport (centered-ish).
-    fn scroll_pane_to_match(tab: &mut tab::Tab, _id: tab::PaneId, m: &SearchMatch) {
-        let (_cols, rows) = tab.grid_size();
-        let offset = tab.display_offset();
-        let target = m.line as i32;
-        let view_top = offset as i32;
-        let view_bottom = view_top + rows as i32 - 1;
-        // If the match line is already visible, no scroll needed.
-        if target >= view_top && target <= view_bottom {
-            return;
-        }
-        // Otherwise scroll so the line sits ~1/3 down from the top.
-        let new_offset = target.saturating_sub(rows as i32 / 3).max(0) as usize;
-        tab.scroll_to(new_offset);
-    }
-
-    /// Handle a typed character while search is active: append to query,
-    /// re-scan, and redraw. Returns `true` if the key was consumed by
-    /// search (so it is not forwarded to the PTY).
-    fn search_type_char(&mut self, ch: char) -> bool {
-        let Some(state) = self.search.as_mut() else {
-            return false;
-        };
-        state.query.push(ch);
-        let _ = state;
-        self.rescan_search();
-        true
-    }
-
-    /// Handle backspace while search is active.
-    fn search_backspace(&mut self) {
-        let mut popped = false;
-        if let Some(state) = self.search.as_mut() {
-            popped = state.query.pop().is_some();
-        }
-        if popped {
-            self.rescan_search();
-        }
-    }
-
-    /// Re-scan the focused pane's term with the current query and redraw.
-    fn rescan_search(&mut self) {
-        let Some(tab) = self.tabs.as_ref().and_then(|t| t.active()) else {
-            return;
-        };
-        let id = tab.active_id();
-        let Some(pane) = tab.pane(id) else {
-            return;
-        };
-        let Ok(term) = pane.term.lock() else {
-            return;
-        };
-        let Some(state) = self.search.as_mut() else {
-            drop(term);
-            return;
-        };
-        state.search(&term);
-        drop(term);
-        self.force_draw = true;
-        self.request_redraw();
-    }
-
-    /// Return a search highlight color (linearized amber) for match bg_rects.
-    fn search_highlight_rgb() -> (u8, u8, u8) {
-        // Amber highlight, sRGB -> linear handled by renderer via
-        // NeotermConfig::srgb8_to_linear. We pass raw sRGB here.
-        (255, 200, 50)
-    }
-
-    /// Shared paste core: normalize newlines, honor bracketed paste.
-    fn write_paste(&mut self, text: String) {
-        if text.is_empty() {
-            return;
-        }
-        let Some(tab) = self.tabs.as_ref().and_then(|t| t.active()) else {
-            return;
-        };
-        // Normalize newlines for the PTY; honor bracketed paste when the
-        // running app requested it (e.g. vim, readline).
-        let body = text.replace("\r\n", "\r").replace('\n', "\r");
-        if tab.bracketed_paste() {
-            tab.write(b"\x1b[200~");
-            tab.write(body.as_bytes());
-            tab.write(b"\x1b[201~");
-        } else {
-            tab.write(body.as_bytes());
-        }
-    }
-
+    /// Set up file watcher for config hot-reload.
     fn setup_config_watch(&mut self) {
         let Some(path) = NeotermConfig::path() else {
             return;
@@ -510,6 +241,7 @@ impl App {
         }
     }
 
+    /// Poll config reload and apply to all windows.
     fn poll_config_reload(&mut self) {
         let dirty = match &self.config_rx {
             Some(rx) => rx.try_iter().next().is_some(),
@@ -521,242 +253,150 @@ impl App {
             let new_cfg = NeotermConfig::load();
             log::info!("config reloaded");
             self.cfg = new_cfg;
-            if let Some(r) = self.renderer.as_mut() {
-                r.apply_config(&self.cfg);
+            // Apply to all windows
+            for ws in self.windows.values_mut() {
+                ws.renderer.apply_config(&self.cfg);
                 // Keep a live zoom across reloads; only 0 / restart resets it.
                 if let Some(size) = self.font_override {
-                    r.set_font_size(size);
+                    ws.renderer.set_font_size(size);
                 }
+                ws.tabs.apply_config(&self.cfg);
+                ws.force_draw = true;
+                ws.window.request_redraw();
             }
-            if let Some(t) = self.tabs.as_mut() {
-                t.apply_config(&self.cfg);
-            }
-            // Config affects colors/metrics: reflow (font size may have
-            // changed) and force the next redraw to present.
-            self.reflow_grid();
         }
     }
 
-    /// Cols/rows fitting the window. Delegates to the renderer so the grid
-    /// uses the same advance/padding as drawing and hit-testing (font zoom
-    /// and custom families included). Heuristic only before the renderer
-    /// exists.
-    fn estimate_grid(&self, width_px: u32, height_px: u32) -> (u16, u16) {
-        let scale = self.window.as_ref().map(|w| w.scale_factor()).unwrap_or(1.0) as f32;
-        if let Some(r) = self.renderer.as_ref() {
-            return r.grid_size(width_px, height_px, scale, self.strip_on());
-        }
-        let cell_w = self.cfg.font_size * 0.62 * scale;
-        let cell_h = self.cfg.font_size * 1.35 * scale;
-        let top = if self.strip_on() { 32.0 } else { 10.0 };
-        let cols = ((width_px as f32 - 24.0 * scale) / cell_w.max(1.0)) as u16;
-        let rows = ((height_px as f32 - (top + 10.0) * scale) / cell_h.max(1.0)) as u16;
-        (cols.clamp(20, 400), rows.clamp(5, 200))
-    }
-
-    /// Re-flow every pane after a metrics change (font zoom, config reload).
-    /// `resize_body` only resizes panes whose grid changed, so this never
-    /// SIGWINCH-storms unchanged panes.
-    fn reflow_grid(&mut self) {
-        let grid = self.window.as_ref().map(|w| {
-            let s = w.inner_size();
-            self.estimate_grid(s.width, s.height)
-        });
-        if let (Some((cols, rows)), Some(tabs)) = (grid, self.tabs.as_mut()) {
-            tabs.resize_all(cols, rows);
-        }
-        self.force_draw = true;
-        self.request_redraw();
-    }
-
-    /// Apply a session font size to the renderer and reflow the grid.
-    fn apply_font_size(&mut self, size: f32) {
-        if let Some(r) = self.renderer.as_mut() {
-            r.set_font_size(size);
-        }
-        self.reflow_grid();
-    }
-
-    fn current_font_size(&self) -> f32 {
-        self.renderer
-            .as_ref()
-            .map(|r| r.font_size())
-            .unwrap_or(self.cfg.font_size)
-    }
-
-    /// Ctrl+Shift+Plus/Minus: step the font size, session-only.
-    fn zoom_font(&mut self, delta: f32) {
-        let size = (self.current_font_size() + delta).clamp(6.0, 48.0);
-        self.font_override = Some(size);
-        self.apply_font_size(size);
-    }
-
-    /// Ctrl+Shift+0: back to the configured font size.
-    fn reset_font(&mut self) {
-        self.font_override = None;
-        self.apply_font_size(self.cfg.font_size);
-    }
-
-    /// Show a short confirmation in the tab strip (copy / paste).
-    fn set_toast(&mut self, text: String) {
-        self.toast = Some((text, Instant::now() + Duration::from_millis(1400)));
-        self.force_draw = true;
-        self.request_redraw();
-    }
-
-    /// Ctrl+Shift+R: start editing the active tab's title. The strip
-    /// shows the text being typed; Enter commits (and pins it), Esc
-    /// cancels.
-    fn start_rename(&mut self) {
-        let (tab, text) = match self.tabs.as_ref() {
-            Some(tabs) => (
-                tabs.active_index(),
-                tabs.active().map(|t| t.title()).unwrap_or_default(),
-            ),
-            None => return,
-        };
-        self.rename = Some(RenameState {
-            tab,
-            text,
-            fresh: true,
-        });
-        self.force_draw = true;
-        self.request_redraw();
-    }
-
-    /// Keyboard input while a rename is live: every key edits the title.
-    fn on_rename_key(&mut self, event: &KeyEvent) {
-        /// What the key did.
-        enum Next {
-            Commit(String),
-            Cancel,
-            Edit,
-        }
-
-        // Only key *presses* edit the title (winit also delivers releases).
-        if event.state != ElementState::Pressed {
-            return;
-        }
-        let ctrl = self.mods.state().control_key();
-        let next = {
-            let Some(state) = self.rename.as_mut() else {
-                return;
-            };
-            match &event.logical_key {
-                Key::Named(NamedKey::Enter) => Next::Commit(state.text.trim().to_string()),
-                Key::Named(NamedKey::Escape) => Next::Cancel,
-                Key::Named(NamedKey::Backspace) => {
-                    state.text.pop();
-                    state.fresh = false;
-                    Next::Edit
-                }
-                _ => {
-                    if ctrl {
-                        // Ctrl+U clears the field; other chords are ignored.
-                        if let Key::Character(c) = &event.logical_key {
-                            if c.eq_ignore_ascii_case("u") {
-                                state.text.clear();
-                                state.fresh = false;
-                            }
-                        }
-                    } else if let Some(text) = &event.text {
-                        // Ignore control characters (they are commands,
-                        // not title text).
-                        if !text.chars().any(|c| c.is_control()) {
-                            // The prefilled title behaves like selected
-                            // text: the first keystroke replaces it.
-                            if state.fresh {
-                                state.text.clear();
-                                state.fresh = false;
-                            }
-                            state.text.push_str(text);
-                        }
+    /// Find word boundaries on a grid line for double-click word selection.
+    /// Returns (start_col, end_col) where the word spans.
+    fn word_bounds_from_grid(tab: &Tab, pane_id: PaneId, row: i32, col: usize) -> (usize, usize) {
+        if let Some(pane) = tab.pane(pane_id) {
+            if let Ok(term) = pane.term.lock() {
+                let grid = term.grid();
+                let line_idx = Line(row);
+                // Check bounds using screen_lines
+                if (row as usize) < grid.screen_lines() {
+                    let line = &grid[line_idx];
+                    let chars: Vec<char> = line
+                        .into_iter()
+                        .filter(|c| !c.flags.contains(alacritty_terminal::term::cell::Flags::WIDE_CHAR_SPACER))
+                        .map(|c| c.c)
+                        .collect();
+                    if chars.is_empty() {
+                        return (col, col);
                     }
-                    Next::Edit
+                    let char_idx = col.min(chars.len().saturating_sub(1));
+                    let mut start = char_idx;
+                    let mut end = char_idx;
+                    // Expand left
+                    while start > 0 && !chars[start - 1].is_whitespace() {
+                        start -= 1;
+                    }
+                    // Expand right
+                    while end < chars.len() && !chars[end].is_whitespace() {
+                        end += 1;
+                    }
+                    return (start, end);
                 }
             }
-        };
-
-        match next {
-            Next::Commit(name) => {
-                let tab = self.rename.as_ref().map(|s| s.tab).unwrap_or(0);
-                self.rename = None;
-                if let Some(tabs) = self.tabs.as_mut() {
-                    // An empty name clears the pin (live OSC titles return).
-                    tabs.set_pin(tab, if name.is_empty() { None } else { Some(name) });
-                }
-            }
-            Next::Cancel => self.rename = None,
-            Next::Edit => {}
         }
-        self.force_draw = true;
-        self.request_redraw();
+        (col, col)
     }
 
-    fn request_redraw(&self) {
-        if let Some(w) = self.window.as_ref() {
-            w.request_redraw();
-        }
+    // ========================================================================
+    // Per-window handler methods (take &mut WindowState instead of &mut self)
+    // ========================================================================
+    
+    /// Show a short confirmation in the tab strip (copy / paste).
+    fn set_toast(&mut self, ws: &mut WindowState, text: String) {
+        ws.toast = Some((text, Instant::now() + Duration::from_millis(1400)));
+        ws.force_draw = true;
+        ws.window.request_redraw();
     }
-
-    /// Whether the tab strip is currently visible (Ghostty auto-hide).
-    fn strip_on(&self) -> bool {
-        // While renaming, the strip must be visible: that is where the
-        // text is being edited.
-        if self.rename.is_some() {
+    
+    /// Apply a session font size to the renderer and reflow the grid for a specific window.
+    fn apply_font_size(&mut self, ws: &mut WindowState, size: f32) {
+        ws.renderer.set_font_size(size);
+        self.reflow_grid(ws);
+    }
+    
+    /// Current font size for a specific window.
+    fn current_font_size(&self, ws: &WindowState) -> f32 {
+        ws.renderer.font_size()
+    }
+    
+    /// Ctrl+Shift+Plus/Minus: step the font size, session-only for a specific window.
+    fn zoom_font(&mut self, ws: &mut WindowState, delta: f32) {
+        let size = (self.current_font_size(ws) + delta).clamp(6.0, 48.0);
+        self.font_override = Some(size);
+        self.apply_font_size(ws, size);
+    }
+    
+    /// Ctrl+Shift+0: back to the configured font size for a specific window.
+    fn reset_font(&mut self, ws: &mut WindowState) {
+        self.font_override = None;
+        self.apply_font_size(ws, self.cfg.font_size);
+    }
+    
+    /// Cols/rows fitting the window. Delegates to the renderer so the grid
+    /// uses the same advance/padding as drawing and hit-testing.
+    fn estimate_grid(cfg_tab_bar: &str, ws: &WindowState, width_px: u32, height_px: u32) -> (u16, u16) {
+        let scale = ws.window.scale_factor() as f32;
+        ws.renderer.grid_size(width_px, height_px, scale, Self::strip_on(cfg_tab_bar, ws))
+    }
+    
+    /// Re-flow every pane after a metrics change (font zoom, config reload) for a specific window.
+    fn reflow_grid(&mut self, ws: &mut WindowState) {
+        let size = ws.window.inner_size();
+        let (cols, rows) = Self::estimate_grid(&self.cfg.tab_bar, ws, size.width, size.height);
+        ws.tabs.resize_all(cols, rows);
+        ws.force_draw = true;
+        ws.window.request_redraw();
+    }
+    
+    /// Whether the tab strip is currently visible (Ghostty auto-hide) for a specific window.
+    fn strip_on(cfg_tab_bar: &str, ws: &WindowState) -> bool {
+        if ws.rename.is_some() {
             return true;
         }
-        let n = self.tabs.as_ref().map(|t| t.len()).unwrap_or(0);
-        mouse::strip_visible(n, &self.cfg.tab_bar)
+        let n = ws.tabs.len();
+        mouse::strip_visible(n, cfg_tab_bar)
     }
-
-    /// Tab titles as shown in the strip, with an in-progress rename
-    /// substituted in (the caret is the trailing underscore).
-    fn tab_titles(&self) -> Vec<String> {
-        let mut titles = self.tabs.as_ref().map(|t| t.titles()).unwrap_or_default();
-        if let Some(r) = &self.rename {
+    
+    /// Tab titles as shown in the strip, with an in-progress rename substituted in.
+    fn tab_titles(&self, ws: &WindowState) -> Vec<String> {
+        let mut titles = ws.tabs.titles();
+        if let Some(r) = &ws.rename {
             if let Some(slot) = titles.get_mut(r.tab) {
                 *slot = format!("{}_", r.text);
             }
         }
         titles
     }
-
-    /// The tab the pointer is over, if it is in the strip band. The hovered
-    /// tab reveals its close mark.
-    fn hovered_tab(&self) -> Option<usize> {
-        if !self.strip_on() {
+    
+    /// The tab the pointer is over, if it is in the strip band.
+    fn hovered_tab(&self, ws: &WindowState) -> Option<usize> {
+        if !Self::strip_on(&self.cfg.tab_bar, ws) {
             return None;
         }
-        let pos = self.cursor_pos?;
-        let window = self.window.as_ref()?;
-        let renderer = self.renderer.as_ref()?;
-        let tabs = self.tabs.as_ref()?;
-        let scale = window.scale_factor() as f32;
-        let g = renderer.body_geometry(scale, true);
+        let pos = ws.cursor_pos?;
+        let scale = ws.window.scale_factor() as f32;
+        let g = ws.renderer.body_geometry(scale, Self::strip_on(&self.cfg.tab_bar, ws));
         if pos.y as f32 >= g.3 {
             return None;
         }
-        let titles = tabs.titles();
+        let titles = self.tab_titles(ws);
         let adv = g.0 / scale.max(f32::EPSILON);
         let regions = mouse::tab_regions(&titles, adv, renderer::TAB_LEFT * scale, scale);
         mouse::tab_hit(&regions, pos.x as f32)
     }
-
-    /// Resolve physical-pixel coordinates to the pane under the cursor:
-    /// (pane id, pane-local col, pane-local viewport row, half). None on
-    /// dividers, the tab strip, or outside all panes. Coordinates are
-    /// pane-local so selection Points and SGR reports match the app's own
-    /// grid size.
-    fn pane_cell_at(&self, x: f64, y: f64) -> Option<(PaneId, usize, usize, Side)> {
-        let window = self.window.as_ref()?;
-        let renderer = self.renderer.as_ref()?;
-        let tabs = self.tabs.as_ref()?;
-        let tab = tabs.active()?;
-        let scale = window.scale_factor() as f32;
-        let (cell_w, line_h, left, top) = renderer.body_geometry(scale, self.strip_on());
-        // Unbounded clamp: pane_at decides membership (dividers → None).
+    
+    /// Resolve physical-pixel coordinates to the pane under the cursor.
+    fn pane_cell_at(&self, ws: &WindowState, x: f64, y: f64) -> Option<(PaneId, usize, usize, Side)> {
+        let scale = ws.window.scale_factor() as f32;
+        let (cell_w, line_h, left, top) = ws.renderer.body_geometry(scale, Self::strip_on(&self.cfg.tab_bar, ws));
         let hit = mouse::hit_test(x, y, cell_w, line_h, left, top, 100_000, 10_000, 0)?;
+        let tab = ws.tabs.active()?;
         let layout = tab.layout();
         let (id, rect) = layout
             .panes
@@ -770,43 +410,32 @@ impl App {
             hit.side,
         ))
     }
-
-    /// Show a resize cursor for divider hover/drag (deduped: windowing
-    /// round-trip only on change).
-    fn set_split_cursor(&mut self, icon: Option<CursorIcon>) {
-        if self.split_cursor == icon {
+    
+    /// Show a resize cursor for divider hover/drag (deduped).
+    fn set_split_cursor(&mut self, ws: &mut WindowState, icon: Option<CursorIcon>) {
+        if ws.split_cursor == icon {
             return;
         }
-        self.split_cursor = icon;
-        if let Some(w) = self.window.as_ref() {
-            w.set_cursor(icon.unwrap_or(CursorIcon::Default));
-        }
+        ws.split_cursor = icon;
+        ws.window.set_cursor(icon.unwrap_or(CursorIcon::Default));
     }
-    /// Divider under the cursor, if any: (tab index, tree path, direction,
-    /// parent span) for starting a drag-resize.
-    fn divider_grab(&self, x: f64, y: f64) -> Option<(usize, Vec<bool>, SplitDir, CellRect)> {
-        let window = self.window.as_ref()?;
-        let renderer = self.renderer.as_ref()?;
-        let tabs = self.tabs.as_ref()?;
-        let tab = tabs.active()?;
-        let scale = window.scale_factor() as f32;
-        let (cell_w, line_h, left, top) = renderer.body_geometry(scale, self.strip_on());
+    
+    /// Divider under the cursor, if any.
+    fn divider_grab(&self, ws: &WindowState, x: f64, y: f64) -> Option<(usize, Vec<bool>, SplitDir, CellRect)> {
+        let scale = ws.window.scale_factor() as f32;
+        let (cell_w, line_h, left, top) = ws.renderer.body_geometry(scale, Self::strip_on(&self.cfg.tab_bar, ws));
         let hit = mouse::hit_test(x, y, cell_w, line_h, left, top, 100_000, 10_000, 0)?;
+        let tab = ws.tabs.active()?;
         let (path, _) = tab.divider_at(hit.col, hit.grid_line as usize)?;
         let (dir, parent) = tab.divider_info(&path)?;
-        Some((tabs.active_index(), path, dir, parent))
+        Some((ws.tabs.active_index(), path, dir, parent))
     }
-
-    /// Scrollbar live geometry + history. None when hidden (no history)
-    /// or without window/tab. Mirrors the rect math in `Renderer::draw`.
-    fn scrollbar_geom(&self) -> Option<(mouse::ScrollBar, f32, usize)> {
-        let window = self.window.as_ref()?;
-        let renderer = self.renderer.as_ref()?;
-        let tab = self.tabs.as_ref()?.active()?;
-        let scale = window.scale_factor() as f32;
-        let (cell_w, line_h, left, top) = renderer.body_geometry(scale, self.strip_on());
-        // Track lives inside the ACTIVE pane (splits: each pane owns its
-        // scrollback; the bar never overlays a neighboring pane).
+    
+    /// Scrollbar live geometry + history.
+    fn scrollbar_geom(&self, ws: &WindowState) -> Option<(mouse::ScrollBar, f32, usize, usize)> {
+        let scale = ws.window.scale_factor() as f32;
+        let tab = ws.tabs.active()?;
+        let (cell_w, line_h, left, top) = ws.renderer.body_geometry(scale, Self::strip_on(&self.cfg.tab_bar, ws));
         let layout = tab.layout();
         let (_, rect) = layout
             .panes
@@ -816,228 +445,121 @@ impl App {
         let track_top = top + rect.row as f32 * line_h;
         let track_h = (rect.rows as f32 * line_h - 4.0 * scale).max(0.0);
         let history = tab.history_size();
+        let viewport_rows = tab.grid_size().1;
         let bar = mouse::scrollbar(
             track_top,
             track_h,
             scale,
             history,
             tab.display_offset(),
-            tab.grid_size().1,
+            viewport_rows,
         );
         if bar.thumb.is_none() {
             return None;
         }
         let bar_w = mouse::BAR_W * scale;
         let track_x = left + (rect.col + rect.cols) as f32 * cell_w - bar_w - mouse::BAR_MARGIN * scale;
-        Some((bar, track_x, history))
+        Some((bar, track_x, history, viewport_rows))
     }
-
-    fn on_left_press(&mut self) {
-        let Some(pos) = self.cursor_pos else {
+    
+    // ---- Mouse handlers ----
+    
+    fn on_left_press(&mut self, ws: &mut WindowState) {
+        let Some(pos) = ws.cursor_pos else {
             return;
         };
-        self.left_held = true;
+        ws.left_held = true;
+        
         // Tab bar first: `+` opens, close mark closes, elsewhere switches.
-        // Hidden strip: clicks fall through to the body. Chrome never
-        // reaches selection/apps.
         let tab_click: Option<usize> = (|| {
-            if !self.strip_on() {
+            if !Self::strip_on(&self.cfg.tab_bar, ws) {
                 return None;
             }
-            let window = self.window.as_ref()?;
-            let renderer = self.renderer.as_ref()?;
-            self.tabs.as_ref()?;
-            let scale = window.scale_factor() as f32;
-            let g = renderer.body_geometry(scale, self.strip_on());
+            let scale = ws.window.scale_factor() as f32;
+            let g = ws.renderer.body_geometry(scale, Self::strip_on(&self.cfg.tab_bar, ws));
             if pos.y as f32 >= g.3 {
                 return None;
             }
-            let titles = self.tab_titles();
+            let titles = self.tab_titles(ws);
             let adv = g.0 / scale.max(f32::EPSILON);
             let regions = mouse::tab_regions(&titles, adv, renderer::TAB_LEFT * scale, scale);
             mouse::tab_hit(&regions, pos.x as f32)
         })();
-        if self.strip_on() {
+        
+        if Self::strip_on(&self.cfg.tab_bar, ws) {
             // `+` new-tab mark (outside all tab segments).
             let new_tab = (|| {
-                let window = self.window.as_ref()?;
-                let renderer = self.renderer.as_ref()?;
-                self.tabs.as_ref()?;
-                let scale = window.scale_factor() as f32;
-                let g = renderer.body_geometry(scale, self.strip_on());
+                let scale = ws.window.scale_factor() as f32;
+                let g = ws.renderer.body_geometry(scale, Self::strip_on(&self.cfg.tab_bar, ws));
                 if pos.y as f32 >= g.3 {
                     return None;
                 }
-                let titles = self.tab_titles();
+                let titles = self.tab_titles(ws);
                 let adv = g.0 / scale.max(f32::EPSILON);
-                mouse::tab_new_hit(&titles, adv, renderer::TAB_LEFT * scale, scale, pos.x as f32)
-                    .then_some(())
+                let left = renderer::TAB_LEFT * scale;
+                // Check if clicking on the `+` mark using tab_new_hit
+                if mouse::tab_new_hit(&titles, adv, left, scale, pos.x as f32) {
+                    Some(())
+                } else {
+                    None
+                }
             })();
             if new_tab.is_some() {
-                if let Some(tabs) = self.tabs.as_mut() {
-                    let _ = tabs.new_tab(&self.cfg);
+                if let Err(e) = ws.tabs.new_tab(&self.cfg) {
+                    log::error!("new tab failed: {e:#}");
                 }
-                self.force_draw = true;
-                self.request_redraw();
+                ws.force_draw = true;
+                ws.window.request_redraw();
                 return;
             }
-        }
-        if let Some(i) = tab_click {
-            // Close mark (`x` zone) closes instead of switching.
-            let close = (|| {
-                let window = self.window.as_ref()?;
-                let renderer = self.renderer.as_ref()?;
-                self.tabs.as_ref()?;
-                let scale = window.scale_factor() as f32;
-                let g = renderer.body_geometry(scale, self.strip_on());
-                let titles = self.tab_titles();
-                let adv = g.0 / scale.max(f32::EPSILON);
-                mouse::tab_close_hit(
-                    &titles,
-                    adv,
-                    renderer::TAB_LEFT * scale,
-                    scale,
-                    pos.x as f32,
-                )
-            })();
-            if let Some(tabs) = self.tabs.as_mut() {
-                if close == Some(i) {
-                    tabs.close_at(i, &self.cfg);
-                } else {
-                    tabs.select(i);
-                    // Start tab drag (reorder): track which tab we're dragging.
-                    self.tab_drag = Some(i);
-                }
-            }
-            self.force_draw = true;
-            self.request_redraw();
-            return;
-        }
-        // Divider chrome: grab for drag-resize. Above scrollbar/body.
-        if self.split_drag.is_none() {
-            if let Some((tab_idx, path, dir, parent)) = self.divider_grab(pos.x, pos.y) {
-                self.split_drag = Some(SplitDrag {
-                    tab: tab_idx,
-                    path,
-                    dir,
-                    parent,
-                });
-                self.left_held = true;
-                self.set_split_cursor(Some(match dir {
-                    SplitDir::V => CursorIcon::ColResize,
-                    SplitDir::H => CursorIcon::RowResize,
-                }));
-                return;
-            }
-        }
-        // Scrollbar chrome first: never selection, never app mouse reports.
-        if let Some((bar, track_x, _)) = self.scrollbar_geom() {
-            let x = pos.x as f32;
-            let y = pos.y as f32;
-            let in_bar = x >= track_x
-                && x <= track_x + bar.track_w
-                && y >= bar.track_top
-                && y <= bar.track_top + bar.track_h;
-            if in_bar {
-                if let Some((thumb_y, thumb_h)) = bar.thumb {
-                    if y >= thumb_y && y <= thumb_y + thumb_h {
-                        // Grab the thumb (dragged in on_cursor_moved).
-                        self.scroll_drag = Some(y - thumb_y);
-                    } else if let Some(tab) =
-                        self.tabs.as_ref().and_then(|t| t.active())
-                    {
-                        // Track click: page toward the click.
-                        tab.scroll_page(y < thumb_y);
-                        self.force_draw = true;
+            if let Some(i) = tab_click {
+                if let Some(tabs) = ws.tabs.get_mut(i) {
+                    let close_x = (|| {
+                        let scale = ws.window.scale_factor() as f32;
+                        let g = ws.renderer.body_geometry(scale, Self::strip_on(&self.cfg.tab_bar, ws));
+                        let titles = self.tab_titles(ws);
+                        let adv = g.0 / scale.max(f32::EPSILON);
+                        let left = renderer::TAB_LEFT * scale;
+                        // Use tab_close_hit to check if clicking on close mark
+                        mouse::tab_close_hit(&titles, adv, left, scale, pos.x as f32)
+                    })();
+                    if close_x == Some(i) {
+                        ws.tabs.close_at(i, &self.cfg);
+                        ws.force_draw = true;
+                        ws.window.request_redraw();
+                        return;
                     }
-                }
-                self.request_redraw();
-                return;
-            }
-        }
-        // Pane drag: Shift+click on a pane to start dragging it to another tab.
-        // Must be before pane_cell_at check since we need the pane.
-        if self.mods.state().shift_key() {
-            if let Some((pid, _, _, _)) = self.pane_cell_at(pos.x, pos.y) {
-                if let Some(tabs) = self.tabs.as_ref() {
-                    if let Some(tab) = tabs.active() {
-                        if tab.pane(pid).is_some() {
-                            self.pane_drag = Some((tabs.active_index(), pid));
-                            self.force_draw = true;
-                            self.request_redraw();
-                            return;
-                        }
-                    }
+                    ws.tabs.select(i);
+                    ws.force_draw = true;
+                    ws.window.request_redraw();
+                    return;
                 }
             }
         }
-        let Some((pid, col, vrow, side)) = self.pane_cell_at(pos.x, pos.y) else {
-            // Divider, tab bar, or outside: no selection, no app report.
+        
+        // Body: selection / divider / tab drag / pane drag
+        let Some((pid, col, vrow, side)) = self.pane_cell_at(ws, pos.x, pos.y) else {
             return;
         };
-        // Ctrl+click on a hyperlink cell: open the URI in the default browser.
-        // Takes priority over selection and app-mouse reporting.
-        if self.mods.state().control_key() {
-            if let Some(tab) = self.tabs.as_ref().and_then(|t| t.active()) {
-                if let Some(pane) = tab.pane(pid) {
-                    if let Ok(term) = pane.term.lock() {
-                        let grid = term.grid();
-                        let screen_lines = term.screen_lines();
-                        let grid_line = vrow as i32 - pane.display_offset() as i32;
-                        if grid_line >= 0 && (grid_line as usize) < screen_lines {
-                            let row = &grid[Line(grid_line)];
-                            let cell = &row[Column(col)];
-                            if let Some(hyperlink) = cell.hyperlink() {
-                                let uri = hyperlink.uri().to_string();
-                                if cfg!(target_os = "macos") {
-                                    let _ = std::process::Command::new("open").arg(&uri).spawn();
-                                } else if cfg!(target_os = "windows") {
-                                    let _ = std::process::Command::new("cmd")
-                                        .args(["/C", "start", "", &uri])
-                                        .spawn();
-                                } else {
-                                    let _ = std::process::Command::new("xdg-open")
-                                        .arg(&uri)
-                                        .spawn();
-                                }
-                                self.request_redraw();
-                                return;
-                            }
-                        }
-                    }
-                }
+        
+        // Focus the pane on click
+        if let Some(tab) = ws.tabs.active_mut() {
+            if tab.active_id() != pid {
+                tab.focus_id(pid);
+                ws.force_draw = true;
+                ws.window.request_redraw();
             }
         }
-        // Click focuses another pane without starting selection.
-        let focused = match self.tabs.as_mut() {
-            Some(tabs) => match tabs.active_mut() {
-                Some(tab) if tab.active_id() != pid => {
-                    tab.focus_id(pid);
-                    true
-                }
-                _ => false,
-            },
-            None => return,
-        };
-        if focused {
-            self.force_draw = true;
-            self.request_redraw();
-            return;
-        }
-        let Some(tab) = self.tabs.as_ref().and_then(|t| t.active()) else {
+        
+        let Some(tab) = ws.tabs.active() else {
             return;
         };
         let Some(pane) = tab.pane(pid) else {
             return;
         };
-        let point = Point::new(
-            Line(vrow as i32 - pane.display_offset() as i32),
-            Column(col),
-        );
-        let mode = pane.term_mode();
-        if mode.intersects(TermMode::MOUSE_MODE) {
-            // App owns the mouse: SGR press report, no local selection.
-            pane.clear_selection();
+        
+        // App mouse mode?
+        if pane.term_mode().intersects(TermMode::MOUSE_MODE) {
             pane.write(&mouse::encode_sgr(
                 mouse::BTN_LEFT,
                 col,
@@ -1045,75 +567,112 @@ impl App {
                 &self.mods,
                 true,
             ));
-            self.press_app_mouse = true;
-            self.press_pane = Some(pid);
-            self.press_local = Some((col, vrow));
-            self.selecting = false;
+            ws.press_app_mouse = true;
+            ws.press_pane = Some(pid);
+            ws.press_local = Some((col, vrow));
+            ws.anchor = None;
+            ws.selecting = false;
             return;
         }
-        self.press_app_mouse = false;
-        self.press_pane = Some(pid);
-        // Click counting for single/double/triple select (400ms window).
-        let now = Instant::now();
-        let same_cell = self.anchor == Some((pid, point.line.0, col));
-        if same_cell && now.duration_since(self.last_click_at) < Duration::from_millis(400) {
-            self.click_count = (self.click_count % 3) + 1;
-        } else {
-            self.click_count = 1;
+        
+        // Divider drag start (on divider edge)
+        if let Some((tab_idx, path, dir, parent)) = self.divider_grab(ws, pos.x, pos.y) {
+            ws.split_drag = Some(SplitDrag { tab: tab_idx, path, dir, parent });
+            self.set_split_cursor(ws, Some(match dir {
+                SplitDir::V => CursorIcon::EwResize,
+                SplitDir::H => CursorIcon::NsResize,
+            }));
+            return;
         }
-        self.last_click_at = now;
-        self.anchor = Some((pid, point.line.0, col));
-        self.press_local = Some((col, vrow));
-        let ty = match self.click_count {
-            2 => SelectionType::Semantic,
-            3 => SelectionType::Lines,
-            _ => SelectionType::Simple,
-        };
-        pane.begin_selection(ty, point, side);
-        self.selecting = true;
-        // Selection is excluded from damage tracking: force the present.
-        self.force_draw = true;
-        self.request_redraw();
+        
+        // Selection anchor
+        ws.anchor = Some((pid, vrow as i32, col));
+        ws.selecting = true;
+        ws.click_count += 1;
+        ws.last_click_at = Instant::now();
+        
+        // Multi-click: expand selection
+        let anchor = ws.anchor.unwrap();
+        if ws.click_count == 2 {
+            // Word select: use begin_selection + update_selection
+            if let Some(pane) = tab.pane(anchor.0) {
+                let point = Point::new(Line(anchor.1), Column(anchor.2));
+                pane.begin_selection(SelectionType::Simple, point, Side::Left);
+                let (start, end) = Self::word_bounds_from_grid(&tab, anchor.0, anchor.1, anchor.2);
+                let end_point = Point::new(Line(anchor.1), Column(end));
+                pane.update_selection(end_point, Side::Right);
+            }
+        } else if ws.click_count >= 3 {
+            // Line select: use begin_selection + update_selection
+            if let Some(pane) = tab.pane(anchor.0) {
+                let start_point = Point::new(Line(anchor.1), Column(0));
+                pane.begin_selection(SelectionType::Simple, start_point, Side::Left);
+                let cols = tab.grid_size().0;
+                let end_point = Point::new(Line(anchor.1), Column(cols));
+                pane.update_selection(end_point, Side::Right);
+            }
+        }
+        
+        ws.press_pane = Some(pid);
+        ws.press_local = Some((col, vrow));
+        ws.force_draw = true;
+        ws.window.request_redraw();
     }
-
-    fn on_left_release(&mut self) {
-        self.left_held = false;
-        // End of a divider drag (no selection/app-report state was touched).
-        if self.split_drag.take().is_some() {
-            self.set_split_cursor(None);
+    
+    fn on_left_release(&mut self, ws: &mut WindowState) {
+        ws.left_held = false;
+        
+        // Tab drag drop
+        if let Some(src) = ws.tab_drag.take() {
+            ws.force_draw = true;
+            ws.window.request_redraw();
             return;
         }
-        // End of a thumb drag (no selection/app-report state was touched).
-        if self.scroll_drag.take().is_some() {
+        
+        // Pane drag drop
+        if let Some((src_tab, pid)) = ws.pane_drag.take() {
+            if let Some(dst_tab_idx) = self.hovered_tab(ws) {
+                if dst_tab_idx != src_tab {
+                    if let Some(pane) = ws.tabs.get_mut(src_tab).and_then(|t| t.take_pane(pid)) {
+                        if let Some(dst_tab) = ws.tabs.get_mut(dst_tab_idx) {
+                            dst_tab.add_pane(pid, pane, &self.cfg);
+                            dst_tab.focus_id(pid);
+                            ws.force_draw = true;
+                            ws.window.request_redraw();
+                        }
+                    }
+                }
+            }
+            self.set_split_cursor(ws, None);
+            ws.force_draw = true;
+            ws.window.request_redraw();
             return;
         }
-        // End of a tab drag (reorder).
-        if self.tab_drag.take().is_some() {
-            self.force_draw = true;
-            self.request_redraw();
+        
+        // Divider drag end
+        if ws.split_drag.take().is_some() {
+            self.set_split_cursor(ws, None);
+            ws.force_draw = true;
+            ws.window.request_redraw();
             return;
         }
-        // End of a pane drag (move between tabs) - drop without target tab.
-        if self.pane_drag.take().is_some() {
-            self.force_draw = true;
-            self.request_redraw();
-            return;
-        }
-        if self.press_app_mouse {
-            self.press_app_mouse = false;
-            // Release goes to the press pane (capture semantics), at the
-            // current cursor mapped into it, else the press cell.
-            if let Some(pid) = self.press_pane {
-                let tabs = self.tabs.as_ref();
-                let tab = tabs.and_then(|t| t.active());
-                let pane = tab.and_then(|t| t.pane(pid));
-                if let (Some(pane), Some(pos)) = (pane, self.cursor_pos) {
+        
+        // App mouse release
+        if ws.press_app_mouse {
+            ws.press_app_mouse = false;
+            if let Some(pid) = ws.press_pane {
+                let tabs = &ws.tabs;
+                let tab = tabs.active();
+                if let Some(pane) = tab.and_then(|t| t.pane(pid)) {
                     if pane.term_mode().contains(TermMode::MOUSE_REPORT_CLICK) {
                         let local = self
-                            .pane_cell_at(pos.x, pos.y)
+                            .pane_cell_at(ws, 
+                                ws.cursor_pos.map(|p| p.x).unwrap_or(0.0),
+                                ws.cursor_pos.map(|p| p.y).unwrap_or(0.0),
+                            )
                             .filter(|(id, _, _, _)| *id == pid)
                             .map(|(_, c, r, _)| (c, r))
-                            .or(self.press_local);
+                            .or(ws.press_local);
                         if let Some((col, vrow)) = local {
                             pane.write(&mouse::encode_sgr(
                                 mouse::BTN_RELEASE,
@@ -1126,88 +685,75 @@ impl App {
                     }
                 }
             }
-            self.press_pane = None;
-            self.press_local = None;
+            ws.press_pane = None;
+            ws.press_local = None;
             return;
         }
-        if self.selecting {
-            self.selecting = false;
-            // Plain click (no drag) clears the selection it just opened.
-            if self.click_count == 1 {
-                if let (Some(pos), Some(tab), Some(anchor)) = (
-                    self.cursor_pos,
-                    self.tabs.as_ref().and_then(|t| t.active()),
-                    self.anchor,
-                ) {
-                    if let Some((pid, col, vrow, _)) = self.pane_cell_at(pos.x, pos.y) {
-                        if let Some(pane) = tab.pane(pid) {
-                            let gl = vrow as i32 - pane.display_offset() as i32;
-                            if (pid, gl, col) == anchor {
-                                pane.clear_selection();
-                            }
-                        }
-                    }
+        
+        // Selection finalize: copy to clipboard (and PRIMARY on X11)
+        if ws.selecting {
+            ws.selecting = false;
+            if let Some(tab) = ws.tabs.active() {
+                if let Some(pane) = tab.pane(ws.anchor.map(|a| a.0).unwrap_or(0)) {
+                    pane.clear_selection();
                 }
             }
-            // X11 tradition: whatever selection remains owns PRIMARY.
-            self.copy_primary();
-            self.force_draw = true;
-            self.request_redraw();
-            self.press_pane = None;
-            self.press_local = None;
+            self.copy_primary(ws);
+            ws.force_draw = true;
+            ws.window.request_redraw();
+            ws.press_pane = None;
+            ws.press_local = None;
         }
     }
-
-    fn on_middle_press(&mut self) {
-        let Some(pos) = self.cursor_pos else {
+    
+    fn on_middle_press(&mut self, ws: &mut WindowState) {
+        let Some(pos) = ws.cursor_pos else {
             return;
         };
+        
         // Tab bar: middle-click closes the tab (hidden strip: paste).
         let tab_click: Option<usize> = (|| {
-            if !self.strip_on() {
+            if !Self::strip_on(&self.cfg.tab_bar, ws) {
                 return None;
             }
-            let window = self.window.as_ref()?;
-            let renderer = self.renderer.as_ref()?;
-            self.tabs.as_ref()?;
-            let scale = window.scale_factor() as f32;
-            let g = renderer.body_geometry(scale, self.strip_on());
+            let scale = ws.window.scale_factor() as f32;
+            let g = ws.renderer.body_geometry(scale, Self::strip_on(&self.cfg.tab_bar, ws));
             if pos.y as f32 >= g.3 {
                 return None;
             }
-            let titles = self.tab_titles();
+            let titles = self.tab_titles(ws);
             let adv = g.0 / scale.max(f32::EPSILON);
-            let regions =
-                mouse::tab_regions(&titles, adv, renderer::TAB_LEFT * scale, scale);
+            let regions = mouse::tab_regions(&titles, adv, renderer::TAB_LEFT * scale, scale);
             mouse::tab_hit(&regions, pos.x as f32)
         })();
+        
         if let Some(i) = tab_click {
-            if let Some(tabs) = self.tabs.as_mut() {
-                tabs.close_at(i, &self.cfg);
-            }
-            self.force_draw = true;
-            self.request_redraw();
+            ws.tabs.close_at(i, &self.cfg);
+            ws.force_draw = true;
+            ws.window.request_redraw();
             return;
         }
-        let Some((pid, col, vrow, _)) = self.pane_cell_at(pos.x, pos.y) else {
+        
+        let Some((pid, col, vrow, _)) = self.pane_cell_at(ws, pos.x, pos.y) else {
             return;
         };
-        // Middle-click focuses the pane first (same as left-click).
-        if let Some(tabs) = self.tabs.as_mut() {
-            if let Some(tab) = tabs.active_mut() {
-                if tab.active_id() != pid {
-                    tab.focus_id(pid);
-                    self.force_draw = true;
-                    self.request_redraw();
-                }
+        
+        // Middle-click focuses the pane first
+        if let Some(tabs) = ws.tabs.active_mut() {
+            if tabs.active_id() != pid {
+                tabs.focus_id(pid);
+                ws.force_draw = true;
+                ws.window.request_redraw();
             }
         }
-        let Some(tab) = self.tabs.as_ref().and_then(|t| t.active()) else {
+        
+        let Some(tab) = ws.tabs.active() else {
             return;
         };
         let Some(pane) = tab.pane(pid) else {
             return;
         };
+        
         if pane.term_mode().intersects(TermMode::MOUSE_MODE) {
             pane.write(&mouse::encode_sgr(
                 mouse::BTN_MIDDLE,
@@ -1216,32 +762,33 @@ impl App {
                 &self.mods,
                 true,
             ));
-            self.press_app_middle = true;
-            self.press_pane = Some(pid);
-            self.press_local = Some((col, vrow));
+            ws.press_app_middle = true;
+            ws.press_pane = Some(pid);
+            ws.press_local = Some((col, vrow));
             return;
         }
-        self.do_paste_primary();
+        
+        // PRIMARY paste
+        self.do_paste_primary(ws);
     }
-
-    fn on_middle_release(&mut self) {
-        if !self.press_app_middle {
+    
+    fn on_middle_release(&mut self, ws: &mut WindowState) {
+        if !ws.press_app_middle {
             return;
         }
-        self.press_app_middle = false;
-        if let Some(pid) = self.press_pane {
-            let tabs = self.tabs.as_ref();
-            let tab = tabs.and_then(|t| t.active());
+        ws.press_app_middle = false;
+        if let Some(pid) = ws.press_pane {
+            let tab = ws.tabs.active();
             if let Some(pane) = tab.and_then(|t| t.pane(pid)) {
                 if pane.term_mode().contains(TermMode::MOUSE_REPORT_CLICK) {
                     let local = self
-                        .pane_cell_at(
-                            self.cursor_pos.map(|p| p.x).unwrap_or(0.0),
-                            self.cursor_pos.map(|p| p.y).unwrap_or(0.0),
+                        .pane_cell_at(ws,
+                            ws.cursor_pos.map(|p| p.x).unwrap_or(0.0),
+                            ws.cursor_pos.map(|p| p.y).unwrap_or(0.0),
                         )
                         .filter(|(id, _, _, _)| *id == pid)
                         .map(|(_, c, r, _)| (c, r))
-                        .or(self.press_local);
+                        .or(ws.press_local);
                     if let Some((col, vrow)) = local {
                         pane.write(&mouse::encode_sgr(
                             mouse::BTN_RELEASE,
@@ -1254,746 +801,1436 @@ impl App {
                 }
             }
         }
-        self.press_pane = None;
-        self.press_local = None;
+        ws.press_pane = None;
+        ws.press_local = None;
     }
-
-    fn on_cursor_moved(&mut self, pos: PhysicalPosition<f64>) {
+    
+    fn on_cursor_moved(&mut self, ws: &mut WindowState, pos: PhysicalPosition<f64>) {
         // A hover change re-styles the tab strip (the close mark appears),
         // so it needs a redraw of its own.
-        let hover_before = self.hovered_tab();
-        self.cursor_pos = Some(pos);
-        if self.hovered_tab() != hover_before {
-            self.force_draw = true;
-            self.request_redraw();
+        let hover_before = self.hovered_tab(ws);
+        ws.cursor_pos = Some(pos);
+        if self.hovered_tab(ws) != hover_before {
+            ws.force_draw = true;
+            ws.window.request_redraw();
         }
+        
         // Divider drag: ratio from the pointer, clamped to livable panes.
-        // resize_body only touches panes whose grid size changed.
-        if let Some(drag) = self.split_drag.as_ref() {
+        if let Some(drag) = ws.split_drag.as_ref() {
             let (tab_idx, path, dir, parent) =
                 (drag.tab, drag.path.clone(), drag.dir, drag.parent);
             let mut drop_drag = false;
             let geom = (|| {
-                let window = self.window.as_ref()?;
-                let renderer = self.renderer.as_ref()?;
-                let scale = window.scale_factor() as f32;
-                Some(renderer.body_geometry(scale, self.strip_on()))
+                let scale = ws.window.scale_factor() as f32;
+                Some(ws.renderer.body_geometry(scale, Self::strip_on(&self.cfg.tab_bar, ws)))
             })();
-            if let (Some((cell_w, line_h, left, top)), Some(tabs)) =
-                (geom, self.tabs.as_mut())
-            {
+            if let (Some((cell_w, line_h, left, top)), Some(tabs)) = (geom, ws.tabs.get_mut(tab_idx)) {
                 if let Some(hit) =
                     mouse::hit_test(pos.x, pos.y, cell_w, line_h, left, top, 100_000, 10_000, 0)
                 {
-                    match tabs.get_mut(tab_idx) {
-                        Some(tab) => {
-                            // Abort if the tree changed under the drag (pane
-                            // closed elsewhere): tab indices shift on close.
-                            if tab.divider_info(&path).is_none() {
-                                drop_drag = true;
-                            } else {
-                                let ratio = tab::ratio_from_pointer(
-                                    dir,
-                                    parent,
-                                    hit.col,
-                                    hit.grid_line as usize,
-                                );
-                                tab.set_ratio(&path, dir, parent, ratio);
-                                self.force_draw = true;
-                                self.request_redraw();
-                            }
-                        }
-                        // Dragged tab is gone: drop the drag.
-                        None => drop_drag = true,
+                    // Abort if the tree changed under the drag
+                    if tabs.divider_info(&path).is_none() {
+                        drop_drag = true;
+                    } else {
+                        let ratio = tab::ratio_from_pointer(
+                            dir,
+                            parent,
+                            hit.col,
+                            hit.grid_line as usize,
+                        );
+                        tabs.set_ratio(&path, dir, parent, ratio);
+                        ws.force_draw = true;
+                        ws.window.request_redraw();
                     }
                 }
             }
             if drop_drag {
-                self.split_drag = None;
-                self.set_split_cursor(None);
+                ws.split_drag = None;
+                self.set_split_cursor(ws, None);
             }
-            return;
         }
-        // Tab drag (reorder): track hover over tab bar to reorder tabs.
-        if let Some(drag_idx) = self.tab_drag {
-            if self.strip_on() {
-                let window = self.window.as_ref();
-                let renderer = self.renderer.as_ref();
-                // Get titles and geometry before mutable borrow on tabs.
-                let titles = self.tab_titles();
-                let strip_on = self.strip_on();
-                let scale = window.as_ref().map(|w| w.scale_factor() as f32).unwrap_or(1.0);
-                let g = renderer.as_ref().map(|r| r.body_geometry(scale, strip_on)).unwrap_or((1.0, 1.0, 0.0, 0.0));
-                if (pos.y as f32) < g.3 {
-                    let adv = g.0 / scale.max(f32::EPSILON);
-                    let regions = mouse::tab_regions(&titles, adv, renderer::TAB_LEFT * scale, scale);
-                    if let Some(hover_idx) = mouse::tab_hit(&regions, pos.x as f32) {
-                        if hover_idx != drag_idx {
-                            if let Some(tabs) = self.tabs.as_mut() {
-                                tabs.move_tab(drag_idx, hover_idx);
-                                self.tab_drag = Some(hover_idx);
-                                self.force_draw = true;
-                                self.request_redraw();
-                            }
-                        }
+        
+        // Tab drag: reorder on hover
+        if let Some(src) = ws.tab_drag {
+            if let Some(dst) = self.hovered_tab(ws) {
+                if src != dst {
+                    ws.tabs.move_tab(src, dst);
+                    ws.tab_drag = Some(dst);
+                    ws.force_draw = true;
+                    ws.window.request_redraw();
+                }
+            }
+        }
+        
+        // Pane drag: show target tab
+        if ws.pane_drag.is_some() {
+            ws.force_draw = true;
+            ws.window.request_redraw();
+        }
+        
+        // Selection drag
+        if ws.selecting {
+            if let Some(anchor) = ws.anchor {
+                let Some((pid, col, vrow, _)) = self.pane_cell_at(ws, pos.x, pos.y) else {
+                    return;
+                };
+                if pid != anchor.0 {
+                    return;
+                }
+                let Some(tab) = ws.tabs.active() else {
+                    return;
+                };
+                let Some(pane) = tab.pane(pid) else {
+                    return;
+                };
+                if ws.click_count == 1 {
+                    // Char select: use begin_selection + update_selection
+                    let start_point = Point::new(Line(anchor.1), Column(anchor.2));
+                    let end_point = Point::new(Line(vrow as i32), Column(col));
+                    if start_point != end_point {
+                        pane.begin_selection(SelectionType::Simple, start_point, Side::Left);
+                        pane.update_selection(end_point, Side::Right);
+                    } else {
+                        pane.clear_selection();
                     }
                 }
+                ws.force_draw = true;
+                ws.window.request_redraw();
             }
-            return;
         }
-        // Pane drag: track hover over tab bar to drop pane into another tab.
-        if let Some((src_tab_idx, pane_id)) = self.pane_drag {
-            if self.strip_on() {
-                let window = self.window.as_ref();
-                let renderer = self.renderer.as_ref();
-                // Get titles and geometry before mutable borrow on tabs.
-                let titles = self.tab_titles();
-                let strip_on = self.strip_on();
-                let scale = window.as_ref().map(|w| w.scale_factor() as f32).unwrap_or(1.0);
-                let g = renderer.as_ref().map(|r| r.body_geometry(scale, strip_on)).unwrap_or((1.0, 1.0, 0.0, 0.0));
-                if (pos.y as f32) < g.3 {
-                    let adv = g.0 / scale.max(f32::EPSILON);
-                    let regions = mouse::tab_regions(&titles, adv, renderer::TAB_LEFT * scale, scale);
-                    if let Some(hover_idx) = mouse::tab_hit(&regions, pos.x as f32) {
-                        if hover_idx != src_tab_idx {
-                            // Move pane from src_tab to hover_tab
-                            if let Some(tabs) = self.tabs.as_mut() {
-                                if let Some(src_tab) = tabs.get_mut(src_tab_idx) {
-                                    if let Some(pane) = src_tab.take_pane(pane_id) {
-                                        if let Some(dst_tab) = tabs.get_mut(hover_idx) {
-                                            dst_tab.add_pane(pane_id, pane, &self.cfg);
-                                        }
-                                    }
-                                }
-                                self.pane_drag = None;
-                                self.force_draw = true;
-                                self.request_redraw();
-                            }
-                        }
-                    }
-                }
+        
+        // Scrollbar hover
+        if let Some((bar, track_x, _, _)) = self.scrollbar_geom(ws) {
+            let scale = ws.window.scale_factor() as f32;
+            let bar_w = mouse::BAR_W * scale;
+            let over_bar = pos.x as f32 >= track_x && pos.x as f32 <= track_x + bar_w;
+            if over_bar && bar.thumb.is_some() {
+                self.set_split_cursor(ws, Some(CursorIcon::Default));
+            } else if ws.split_cursor.is_none() {
+                self.set_split_cursor(ws, None);
             }
-            return;
-        }
-        // Thumb drag captures the mouse until release.
-        if let Some(grab) = self.scroll_drag {
-            if let (Some(tab), Some((bar, _, history))) = (
-                self.tabs.as_ref().and_then(|t| t.active()),
-                self.scrollbar_geom(),
-            ) {
-                if let Some((_, thumb_h)) = bar.thumb {
-                    let off = mouse::drag_offset(
-                        pos.y as f32,
-                        grab,
-                        bar.track_top,
-                        bar.track_h,
-                        thumb_h,
-                        history,
-                    );
-                    tab.scroll_to(off);
-                    self.force_draw = true;
-                    self.request_redraw();
-                }
-            }
-            return;
-        }
-        if self.press_app_mouse {
-            // Motion reports stay in the press pane (capture semantics),
-            // at pane-local coordinates.
-            let press = self.press_pane;
-            let tabs = self.tabs.as_ref();
-            let tab = tabs.and_then(|t| t.active());
-            if let (Some(tab), Some(pid), Some((_, col, vrow, _))) =
-                (tab, press, self.pane_cell_at(pos.x, pos.y))
-            {
-                if pid == press.unwrap() {
-                    if let Some(pane) = tab.pane(pid) {
-                        let mode = pane.term_mode();
-                        // Drag reports need DRAG or MOTION; hover reports need MOTION.
-                        let motion_code = if self.left_held && mode.intersects(TermMode::MOUSE_DRAG) {
-                            Some(mouse::BTN_LEFT + mouse::BTN_MOTION)
-                        } else if !self.left_held && mode.intersects(TermMode::MOUSE_MOTION) {
-                            Some(mouse::BTN_RELEASE + mouse::BTN_MOTION)
-                        } else {
-                            None
-                        };
-                        if let Some(code) = motion_code {
-                            pane.write(&mouse::encode_sgr(code, col, vrow, &self.mods, true));
-                            self.press_local = Some((col, vrow));
-                        }
-                    }
-                }
-            }
-            return;
-        }
-        if self.selecting {
-            // Selection extends only inside the press pane; crossing a
-            // divider holds the edge (no cross-pane selections in v1).
-            if let (Some(pid), Some((_, col, vrow, side))) =
-                (self.press_pane, self.pane_cell_at(pos.x, pos.y))
-            {
-                if pid == self.press_pane.unwrap() {
-                    if let Some(pane) = self
-                        .tabs
-                        .as_ref()
-                        .and_then(|t| t.active())
-                        .and_then(|t| t.pane(pid))
-                    {
-                        let point = Point::new(
-                            Line(vrow as i32 - pane.display_offset() as i32),
-                            Column(col),
-                        );
-                        pane.update_selection(point, side);
-                        self.press_local = Some((col, vrow));
-                        self.force_draw = true;
-                        self.request_redraw();
-                    }
-                }
-            }
-            return;
-        }
-        // Hover: resize cursor over dividers (cleared when leaving).
-        if self.split_drag.is_none() && !self.left_held {
-            let over = self.divider_grab(pos.x, pos.y).map(|(_, _, dir, _)| match dir {
-                SplitDir::V => CursorIcon::ColResize,
-                SplitDir::H => CursorIcon::RowResize,
-            });
-            self.set_split_cursor(over);
         }
     }
-
-    fn on_wheel(&mut self, delta: MouseScrollDelta) {
-        // Positive = up into history.
-        let lines: i32 = match delta {
-            MouseScrollDelta::LineDelta(_, y) => (y * 3.0).round() as i32,
-            MouseScrollDelta::PixelDelta(p) => {
-                let scale = self
-                    .window
-                    .as_ref()
-                    .map(|w| w.scale_factor())
-                    .unwrap_or(1.0) as f32;
-                let line_h = self
-                    .renderer
-                    .as_ref()
-                    .map(|r| r.body_geometry(scale, self.strip_on()).1)
-                    .unwrap_or(20.0);
-                (p.y as f32 / line_h.max(1.0)).round() as i32
-            }
+    
+    fn on_wheel(&mut self, ws: &mut WindowState, delta: MouseScrollDelta) {
+        let lines = match delta {
+            MouseScrollDelta::LineDelta(_, y) => y as i32,
+            MouseScrollDelta::PixelDelta(p) => (p.y / 20.0) as i32,
         };
         if lines == 0 {
             return;
         }
-        let Some(tab) = self.tabs.as_ref().and_then(|t| t.active()) else {
-            return;
-        };
-        let mode = tab.term_mode();
-        if mode.intersects(TermMode::MOUSE_MODE) {
-            // Forward wheel as buttons 64/65 (no release events for wheel).
-            let Some(pos) = self.cursor_pos else {
-                return;
-            };
-            let Some((pid, col, vrow, _)) = self.pane_cell_at(pos.x, pos.y) else {
-                return;
-            };
-            let btn = if lines > 0 {
-                mouse::BTN_WHEEL_UP
-            } else {
-                mouse::BTN_WHEEL_DOWN
-            };
-            if let Some(pane) = tab.pane(pid) {
-                for _ in 0..lines.abs().min(10) {
-                    pane.write(&mouse::encode_sgr(btn, col, vrow, &self.mods, true));
+        
+        // Scrollbar drag
+        if let Some(drag) = ws.scroll_drag {
+            if let Some((bar, track_x, history, viewport_rows)) = self.scrollbar_geom(ws) {
+                let scale = ws.window.scale_factor() as f32;
+                let track_h = (bar.track_h * scale).max(1.0);
+                let thumb_h = bar.thumb.map(|t| t.1 * scale).unwrap_or(0.0);
+                let max_scroll = history.saturating_sub(viewport_rows);
+                let new_scroll = ((drag + lines as f32 / track_h.max(1.0)) * max_scroll as f32)
+                    .clamp(0.0, max_scroll as f32)
+                    as usize;
+                if let Some(tab) = ws.tabs.active_mut() {
+                    tab.scroll_to(new_scroll);
+                    ws.force_draw = true;
+                    ws.window.request_redraw();
                 }
             }
             return;
         }
-        if tab.in_alt_screen() {
-            // No scrollback on the alternate screen: arrows, like Alacritty.
-            let seq: &[u8] = if lines > 0 { b"\x1b[A" } else { b"\x1b[B" };
-            for _ in 0..lines.abs().min(10) {
-                tab.write(seq);
+        
+        // Scrollbar thumb hit test to start drag
+        if let Some((bar, track_x, _, _)) = self.scrollbar_geom(ws) {
+            if let Some(pos) = ws.cursor_pos {
+                let scale = ws.window.scale_factor() as f32;
+                let bar_w = mouse::BAR_W * scale;
+                let over_bar = pos.x as f32 >= track_x && pos.x as f32 <= track_x + bar_w;
+                if over_bar {
+                    if let Some(thumb) = bar.thumb {
+                        let thumb_y = thumb.0;
+                        let thumb_h = thumb.1;
+                        let thumb_top = bar.track_top + thumb_y * scale;
+                        let thumb_bottom = thumb_top + thumb_h * scale;
+                        if pos.y as f32 >= thumb_top && pos.y as f32 <= thumb_bottom {
+                            ws.scroll_drag = Some((pos.y as f32 - thumb_top) / (thumb_h * scale).max(1.0));
+                            return;
+                        }
+                    }
+                }
             }
+        }
+        
+        // Regular scroll: forward to active pane
+        if let Some(tab) = ws.tabs.active_mut() {
+            if lines > 0 {
+                tab.scroll_lines(-lines);
+            } else {
+                tab.scroll_lines(-lines);
+            }
+            ws.force_draw = true;
+            ws.window.request_redraw();
+        }
+    }
+    
+    fn on_resized(&mut self, ws: &mut WindowState, size: winit::dpi::PhysicalSize<u32>) {
+        ws.renderer.resize(size.width, size.height);
+        let (cols, rows) = Self::estimate_grid(&self.cfg.tab_bar, ws, size.width, size.height);
+        ws.tabs.resize_all(cols, rows);
+        ws.force_draw = true;
+        ws.window.request_redraw();
+    }
+    
+    fn on_redraw_requested(&mut self, ws: &mut WindowState) {
+        let tabs = &ws.tabs;
+        let titles = self.tab_titles(ws);
+        let active = tabs.active_index();
+        let hover = self.hovered_tab(ws);
+        let blink = ws.blink_on;
+        let strip = Self::strip_on(&self.cfg.tab_bar, ws);
+        
+        // Drain reader wakeups + damage; skip the whole present when
+        // nothing changed since the last frame.
+        let pty_dirty = tabs.take_dirty();
+        let term_damaged = tabs
+            .active()
+            .map(|tab| tab.take_damage())
+            .unwrap_or(true);
+        let ui_changed = titles != ws.last_titles
+            || active != ws.last_active
+            || blink != ws.last_blink_state
+            || ws.force_draw;
+        if !(pty_dirty || term_damaged || ui_changed) {
             return;
         }
-        tab.scroll_lines(lines);
-        // scroll_display marks full damage on offset change; force covers no-ops.
-        self.force_draw = true;
-        self.request_redraw();
+        
+        let r = &mut ws.renderer;
+        let t = &ws.tabs;
+        
+        // All panes of the ACTIVE tab (inactive tabs don't draw).
+        let fg = self.cfg.fg_rgb();
+        let bg = self.cfg.bg_rgb();
+        let mut panes = Vec::new();
+        let mut divs = Vec::new();
+        if let Some(tab) = t.active() {
+            let layout = tab.layout();
+            let focus = tab.active_id();
+            // Search highlights: grid line -> viewport row mapping
+            let search_rows = ws.search.as_ref().and_then(|s| {
+                if s.matches().is_empty() {
+                    None
+                } else {
+                    let offset = tab.display_offset() as i32;
+                    let (_, rows) = tab.grid_size();
+                    let highlight = Self::search_highlight_rgb();
+                    Some((s, offset, rows as i32, highlight))
+                }
+            });
+            for (id, rect) in layout.panes {
+                if let Some(pane) = tab.pane(id) {
+                    let cursor_on = if id == focus { blink } else { true };
+                    let (mut rows, cursor) =
+                        pane.rendered_rows(fg, bg, cursor_on);
+                    // Apply search match highlights to visible rows.
+                    if let Some((state, offset, rows_cnt, highlight)) = search_rows.as_ref() {
+                        if id == focus {
+                            for m in state.matches() {
+                                let vrow = m.line + offset;
+                                if vrow >= 0 && vrow < *rows_cnt {
+                                    let row = &mut rows[vrow as usize];
+                                    let rgb = *highlight;
+                                    row.bg_rects.push((
+                                        m.col_start,
+                                        m.col_end.saturating_sub(1),
+                                        rgb,
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    // Apply copymode selection highlights to visible rows.
+                    if let Some(copymode) = &ws.copymode {
+                        if copymode.pane == id && copymode.anchor.is_some() {
+                            let anchor = copymode.anchor.unwrap();
+                            let cursor = copymode.cursor;
+                            let cols = if let Ok(term) = pane.term.lock() { term.columns().max(1) as usize } else { 80 };
+                            let (start_row, end_row, start_col, end_col) = if copymode.line_mode {
+                                let start = anchor.0.min(cursor.0);
+                                let end = anchor.0.max(cursor.0);
+                                (start, end, 0, cols - 1)
+                            } else {
+                                let start_r = anchor.0.min(cursor.0);
+                                let end_r = anchor.0.max(cursor.0);
+                                let start_c = anchor.1.min(cursor.1);
+                                let end_c = anchor.1.max(cursor.1);
+                                (start_r, end_r, start_c, end_c)
+                            };
+                            let highlight = Self::copymode_highlight_rgb();
+                            for vrow in start_row..=end_row {
+                                if vrow < rows.len() {
+                                    let row = &mut rows[vrow];
+                                    let sc = if copymode.line_mode { 0 } else { start_col };
+                                    let ec = if copymode.line_mode { row.text.chars().count() } else { end_col };
+                                    if sc <= ec {
+                                        row.bg_rects.push((sc, ec, highlight));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    panes.push(PaneDraw {
+                        id,
+                        rect,
+                        rows,
+                        cursor,
+                        focused: id == focus,
+                    });
+                }
+            }
+            divs = layout
+                .dividers
+                .into_iter()
+                .map(|(_, r)| r)
+                .collect();
+        }
+        let scroll = t
+            .active()
+            .map(|tab| {
+                let (_, rows) = tab.grid_size();
+                let pane = tab.layout().panes.iter().find(|(id, _)| *id == tab.active_id()).map(|(_, r)| *r);
+                ScrollState {
+                    history: tab.history_size(),
+                    offset: tab.display_offset(),
+                    rows,
+                    pane,
+                }
+            })
+            .unwrap_or(ScrollState {
+                history: 0,
+                offset: 0,
+                rows: 24,
+                pane: None,
+            });
+        // Visual bell: tint the body while the flash runs.
+        let flash = ws
+            .bell_flash_until
+            .map(|until| Instant::now() < until)
+            .unwrap_or(false);
+        r.set_flash(flash);
+        r.draw(
+            &titles,
+            t.active_index(),
+            hover,
+            ws.toast.as_ref().map(|(text, _)| text.as_str()),
+            &panes,
+            &divs,
+            scroll,
+            strip,
+        );
+        ws.last_titles = titles;
+        ws.last_active = active;
+        ws.last_blink_state = blink;
+        ws.force_draw = false;
+    }
+    
+    // ---- Clipboard ----
+    
+    fn do_copy(&mut self, ws: &mut WindowState) {
+        let text = match ws.tabs.active().and_then(|t| t.copy_text()) {
+            Some(s) => s,
+            None => return,
+        };
+        let chars = text.chars().count();
+        match self.clipboard() {
+            Some(cb) => {
+                if let Err(e) = cb.set_text(text) {
+                    log::error!("copy failed: {e}");
+                    return;
+                }
+                self.set_toast(ws, format!("copied \u{00b7} {chars} chars"));
+            }
+            None => log::error!("copy failed: no clipboard"),
+        }
+    }
+    
+    fn do_paste(&mut self, ws: &mut WindowState) {
+        let text = match self.clipboard() {
+            Some(cb) => match cb.get_text() {
+                Ok(s) => s,
+                Err(e) => {
+                    log::error!("paste failed: {e}");
+                    return;
+                }
+            },
+            None => return,
+        };
+        let chars = text.chars().count();
+        self.write_paste(ws, text);
+        self.set_toast(ws, format!("pasted \u{00b7} {chars} chars"));
+    }
+    
+    /// X11 middle-click: paste the PRIMARY selection buffer.
+    fn do_paste_primary(&mut self, ws: &mut WindowState) {
+        let text = match self.clipboard() {
+            Some(cb) => match cb.get().clipboard(LinuxClipboardKind::Primary).text() {
+                Ok(s) => s,
+                Err(e) => {
+                    log::error!("primary paste failed: {e}");
+                    return;
+                }
+            },
+            None => return,
+        };
+        let chars = text.chars().count();
+        self.write_paste(ws, text);
+        self.set_toast(ws, format!("pasted \u{00b7} {chars} chars"));
+    }
+    
+    /// X11 select-to-copy: mirror the active selection into PRIMARY.
+    fn copy_primary(&mut self, ws: &mut WindowState) {
+        let has_sel = ws
+            .tabs
+            .active()
+            .map(|t| t.has_selection())
+            .unwrap_or(false);
+        if !has_sel {
+            return;
+        }
+        let text = match ws.tabs.active().and_then(|t| t.copy_text()) {
+            Some(s) => s,
+            None => return,
+        };
+        if let Some(cb) = self.clipboard() {
+            if let Err(e) = cb.set().clipboard(LinuxClipboardKind::Primary).text(text) {
+                log::error!("primary copy failed: {e}");
+            }
+        }
+    }
+    
+    /// Shared paste core: normalize newlines, honor bracketed paste.
+    fn write_paste(&mut self, ws: &mut WindowState, text: String) {
+        if text.is_empty() {
+            return;
+        }
+        let Some(tab) = ws.tabs.active() else {
+            return;
+        };
+        let body = text.replace("\r\n", "\r").replace('\n', "\r");
+        if tab.bracketed_paste() {
+            tab.write(b"\x1b[200~");
+            tab.write(body.as_bytes());
+            tab.write(b"\x1b[201~");
+        } else {
+            tab.write(body.as_bytes());
+        }
+    }
+    
+    // ---- Search ----
+    
+    /// Open/close the search overlay.
+    fn toggle_search(&mut self, ws: &mut WindowState) {
+        if ws.search.is_some() {
+            ws.search = None;
+        } else {
+            ws.search = Some(SearchState::new(String::new()));
+        }
+        ws.force_draw = true;
+        ws.window.request_redraw();
+    }
+    
+    /// Close the active search.
+    fn search_cancel(&mut self, ws: &mut WindowState) {
+        if ws.search.is_some() {
+            ws.search = None;
+            ws.force_draw = true;
+            ws.window.request_redraw();
+        }
+    }
+    
+    /// Advance to the next match and scroll the focused pane to it.
+    fn search_next(&mut self, ws: &mut WindowState) {
+        let (id, m) = {
+            let Some(tab) = ws.tabs.active_mut() else {
+                return;
+            };
+            let id = tab.active_id();
+            let Some(pane) = tab.pane(id) else {
+                return;
+            };
+            let Some(state) = ws.search.as_mut() else {
+                return;
+            };
+            let term = match pane.term.lock() {
+                Ok(t) => t,
+                Err(_) => return,
+            };
+            state.search(&term);
+            drop(term);
+            let Some(m) = state.next_match() else {
+                return;
+            };
+            (id, m)
+        };
+        let Some(tab) = ws.tabs.active_mut() else {
+            return;
+        };
+        Self::scroll_pane_to_match(tab, id, &m);
+        ws.force_draw = true;
+        ws.window.request_redraw();
+    }
+    
+    /// Advance to the previous match and scroll the focused pane to it.
+    fn search_prev(&mut self, ws: &mut WindowState) {
+        let (id, m) = {
+            let Some(tab) = ws.tabs.active_mut() else {
+                return;
+            };
+            let id = tab.active_id();
+            let Some(pane) = tab.pane(id) else {
+                return;
+            };
+            let Some(state) = ws.search.as_mut() else {
+                return;
+            };
+            let term = match pane.term.lock() {
+                Ok(t) => t,
+                Err(_) => return,
+            };
+            state.search(&term);
+            drop(term);
+            let Some(m) = state.prev_match() else {
+                return;
+            };
+            (id, m)
+        };
+        let Some(tab) = ws.tabs.active_mut() else {
+            return;
+        };
+        Self::scroll_pane_to_match(tab, id, &m);
+        ws.force_draw = true;
+        ws.window.request_redraw();
+    }
+    
+    /// Scroll the focused pane so `match`'s grid line lands inside the viewport.
+    fn scroll_pane_to_match(tab: &mut tab::Tab, _id: tab::PaneId, m: &SearchMatch) {
+        let (_cols, rows) = tab.grid_size();
+        let offset = tab.display_offset();
+        let target = m.line as i32;
+        let view_top = offset as i32;
+        let view_bottom = view_top + rows as i32 - 1;
+        if target >= view_top && target <= view_bottom {
+            return;
+        }
+        let new_offset = target.saturating_sub(rows as i32 / 3).max(0) as usize;
+        tab.scroll_to(new_offset);
+    }
+    
+    /// Handle a typed character while search is active.
+    fn search_type_char(&mut self, ws: &mut WindowState, ch: char) -> bool {
+        let Some(state) = ws.search.as_mut() else {
+            return false;
+        };
+        state.query.push(ch);
+        self.rescan_search(ws);
+        true
+    }
+    
+    /// Handle backspace while search is active.
+    fn search_backspace(&mut self, ws: &mut WindowState) {
+        let mut popped = false;
+        if let Some(state) = ws.search.as_mut() {
+            popped = state.query.pop().is_some();
+        }
+        if popped {
+            self.rescan_search(ws);
+        }
+    }
+    
+    /// Re-scan the focused pane's term with the current query and redraw.
+    fn rescan_search(&mut self, ws: &mut WindowState) {
+        let Some(tab) = ws.tabs.active() else {
+            return;
+        };
+        let id = tab.active_id();
+        let Some(pane) = tab.pane(id) else {
+            return;
+        };
+        let Ok(term) = pane.term.lock() else {
+            return;
+        };
+        let Some(state) = ws.search.as_mut() else {
+            drop(term);
+            return;
+        };
+        state.search(&term);
+        drop(term);
+        ws.force_draw = true;
+        ws.window.request_redraw();
+    }
+    
+    /// Return a search highlight color (linearized amber) for match bg_rects.
+    fn search_highlight_rgb() -> (u8, u8, u8) {
+        (255, 200, 50)
+    }
+    
+    /// Return a copymode selection highlight color (linearized blue).
+    fn copymode_highlight_rgb() -> (u8, u8, u8) {
+        (100, 150, 255)
+    }
+    
+    // ---- Copymode (Vi-style selection) ----
+    
+    /// Ctrl+Shift+Space: toggle Vi-style copy mode.
+    fn toggle_copymode(&mut self, ws: &mut WindowState) {
+        if ws.copymode.is_some() {
+            ws.copymode = None;
+            log::info!("copymode: off");
+        } else {
+            let Some(tab) = ws.tabs.active() else { return };
+            let pane_id = tab.active_id();
+            let Some(pane) = tab.pane(pane_id) else { return };
+            let Ok(term) = pane.term.lock() else { return };
+            let cursor = term.grid().cursor.point;
+            let cols = term.columns().max(1) as usize;
+            let rows = term.screen_lines().max(1) as usize;
+            // Convert cursor to viewport-relative coordinates
+            let display_offset = term.grid().display_offset() as i32;
+            let cursor_row = cursor.line.0 as i32 - display_offset;
+            let cursor_col = cursor.column.0 as usize;
+            let cursor_row = cursor_row.clamp(0, rows as i32 - 1) as usize;
+            ws.copymode = Some(CopymodeState {
+                pane: pane_id,
+                cursor: (cursor_row, cursor_col),
+                anchor: None,
+                line_mode: false,
+                scroll_offset: 0,
+            });
+            log::info!("copymode: on");
+        }
+        ws.force_draw = true;
+        ws.window.request_redraw();
+    }
+    
+    /// Exit copymode without copying.
+    fn copymode_exit(&mut self, ws: &mut WindowState) {
+        ws.copymode = None;
+        log::info!("copymode: off");
+        ws.force_draw = true;
+        ws.window.request_redraw();
+    }
+    
+    /// Move cursor up in copymode.
+    fn copymode_up(&mut self, ws: &mut WindowState) {
+        let history = self.get_history_size(ws);
+        if let Some(state) = ws.copymode.as_mut() {
+            if state.cursor.0 > 0 {
+                state.cursor.0 -= 1;
+            } else if state.scroll_offset < history {
+                state.scroll_offset += 1;
+            }
+            if state.anchor.is_some() {
+                // Extend selection
+            }
+        }
+        ws.force_draw = true;
+        ws.window.request_redraw();
+    }
+    
+    /// Move cursor down in copymode.
+    fn copymode_down(&mut self, ws: &mut WindowState) {
+        let history = self.get_history_size(ws);
+        let max_row = ws.renderer.grid_size(ws.window.inner_size().width, ws.window.inner_size().height, ws.window.scale_factor() as f32, true).1 as usize;
+        if let Some(state) = ws.copymode.as_mut() {
+            if state.cursor.0 < max_row.saturating_sub(1) {
+                state.cursor.0 += 1;
+            } else if state.scroll_offset > 0 {
+                state.scroll_offset -= 1;
+            }
+            if state.anchor.is_some() {
+                // Extend selection
+            }
+        }
+        ws.force_draw = true;
+        ws.window.request_redraw();
+    }
+    
+    /// Move cursor left in copymode.
+    fn copymode_left(&mut self, ws: &mut WindowState) {
+        if let Some(state) = ws.copymode.as_mut() {
+            if state.cursor.1 > 0 {
+                state.cursor.1 -= 1;
+            }
+            if state.anchor.is_some() {
+                // Extend selection
+            }
+        }
+        ws.force_draw = true;
+        ws.window.request_redraw();
+    }
+    
+    /// Move cursor right in copymode.
+    fn copymode_right(&mut self, ws: &mut WindowState) {
+        let cols = ws.renderer.grid_size(ws.window.inner_size().width, ws.window.inner_size().height, ws.window.scale_factor() as f32, true).0 as usize;
+        if let Some(state) = ws.copymode.as_mut() {
+            if state.cursor.1 + 1 < cols {
+                state.cursor.1 += 1;
+            }
+            if state.anchor.is_some() {
+                // Extend selection
+            }
+        }
+        ws.force_draw = true;
+        ws.window.request_redraw();
+    }
+    
+    /// Page up in copymode.
+    fn copymode_page_up(&mut self, ws: &mut WindowState) {
+        let viewport_rows = ws.renderer.grid_size(ws.window.inner_size().width, ws.window.inner_size().height, ws.window.scale_factor() as f32, true).1 as usize;
+        let history = self.get_history_size(ws);
+        if let Some(state) = ws.copymode.as_mut() {
+            state.scroll_offset = (state.scroll_offset + viewport_rows / 2).min(history);
+        }
+        ws.force_draw = true;
+        ws.window.request_redraw();
+    }
+    
+    /// Page down in copymode.
+    fn copymode_page_down(&mut self, ws: &mut WindowState) {
+        let viewport_rows = ws.renderer.grid_size(ws.window.inner_size().width, ws.window.inner_size().height, ws.window.scale_factor() as f32, true).1 as usize;
+        if let Some(state) = ws.copymode.as_mut() {
+            state.scroll_offset = state.scroll_offset.saturating_sub(viewport_rows / 2);
+        }
+        ws.force_draw = true;
+        ws.window.request_redraw();
+    }
+    
+    /// Home in copymode (beginning of line).
+    fn copymode_home(&mut self, ws: &mut WindowState) {
+        if let Some(state) = ws.copymode.as_mut() {
+            state.cursor.1 = 0;
+        }
+        ws.force_draw = true;
+        ws.window.request_redraw();
+    }
+    
+    /// End in copymode (end of line).
+    fn copymode_end(&mut self, ws: &mut WindowState) {
+        let cols = ws.renderer.grid_size(ws.window.inner_size().width, ws.window.inner_size().height, ws.window.scale_factor() as f32, true).0 as usize;
+        if let Some(state) = ws.copymode.as_mut() {
+            state.cursor.1 = cols.saturating_sub(1);
+        }
+        ws.force_draw = true;
+        ws.window.request_redraw();
+    }
+    
+    /// Start/extend character selection in copymode (v).
+    fn copymode_select(&mut self, ws: &mut WindowState) {
+        if let Some(state) = ws.copymode.as_mut() {
+            if state.anchor.is_none() {
+                state.anchor = Some(state.cursor);
+            }
+        }
+        ws.force_draw = true;
+        ws.window.request_redraw();
+    }
+    
+    /// Start/extend line selection in copymode (V).
+    fn copymode_select_line(&mut self, ws: &mut WindowState) {
+        if let Some(state) = ws.copymode.as_mut() {
+            state.line_mode = true;
+            if state.anchor.is_none() {
+                state.anchor = Some((state.cursor.0, 0));
+            }
+        }
+        ws.force_draw = true;
+        ws.window.request_redraw();
+    }
+    
+    /// Copy selection and exit copymode (y).
+    fn copymode_copy(&mut self, ws: &mut WindowState) {
+        if let Some(state) = ws.copymode.take() {
+            if let Some(tab) = ws.tabs.active() {
+                if let Some(pane) = tab.pane(state.pane) {
+                    if let Ok(term) = pane.term.lock() {
+                        let text = if let Some(anchor) = state.anchor {
+                            let (anchor_row, anchor_col) = anchor;
+                            let (cursor_row, cursor_col) = state.cursor;
+                            let (start_row, end_row, start_col, end_col) = if state.line_mode {
+                                // Line mode: select full lines from anchor to cursor
+                                let start = anchor_row.min(cursor_row);
+                                let end = anchor_row.max(cursor_row);
+                                (start, end, 0, term.columns().max(1) as usize - 1)
+                            } else {
+                                // Character mode: select rectangle from anchor to cursor
+                                let start_r = anchor_row.min(cursor_row);
+                                let end_r = anchor_row.max(cursor_row);
+                                let start_c = anchor_col.min(cursor_col);
+                                let end_c = anchor_col.max(cursor_col);
+                                (start_r, end_r, start_c, end_c)
+                            };
+                            // Convert viewport-relative rows to grid line numbers
+                            let display_offset = term.grid().display_offset() as i32;
+                            let start_line = (start_row as i32 + display_offset) as i32;
+                            let end_line = (end_row as i32 + display_offset) as i32;
+                            let grid_start = Point::new(Line(start_line), Column(start_col));
+                            let grid_end = Point::new(Line(end_line), Column(end_col));
+                            term.bounds_to_string(grid_start, grid_end)
+                        } else {
+                            String::new()
+                        };
+                        if !text.trim().is_empty() {
+                            if let Some(cb) = self.clipboard() {
+                                if let Err(e) = cb.set().text(text) {
+                                    log::error!("copymode copy failed: {e}");
+                                } else {
+                                    log::info!("copymode: copied");
+                                }
+                            }
+                        } else {
+                            log::info!("copymode: no selection to copy");
+                        }
+                    }
+                }
+            }
+        }
+        ws.force_draw = true;
+        ws.window.request_redraw();
+    }
+    
+    /// Get history size for the active pane.
+    fn get_history_size(&self, ws: &WindowState) -> usize {
+        if let Some(tab) = ws.tabs.active() {
+            if let Some(pane) = tab.pane(tab.active_id()) {
+                if let Ok(term) = pane.term.lock() {
+                    return term.grid().history_size();
+                }
+            }
+        }
+        0
+    }
+    
+    /// Handle keyboard input while copymode is active.
+    fn handle_copymode_key(&mut self, ws: &mut WindowState, event: &KeyEvent) {
+        use input::InputAction;
+        use winit::keyboard::{Key, NamedKey};
+        use winit::event::ElementState;
+        
+        if event.state != ElementState::Pressed {
+            return;
+        }
+        
+        let alt = ws
+            .tabs
+            .active()
+            .map(|t| t.in_alt_screen())
+            .unwrap_or(false);
+        
+        // Allow chrome actions to pass through (e.g., Ctrl+Shift+F for search)
+        if let Some(action) = input::chrome_action(&event.logical_key, self.mods.state()) {
+            match action {
+                InputAction::SearchToggle | InputAction::CopymodeToggle => {
+                    // These are handled by map_key below
+                }
+                _ => return, // Other chrome actions don't apply in copymode
+            }
+        }
+        
+        match input::map_key(event, &self.mods, alt) {
+            InputAction::CopymodeUp => self.copymode_up(ws),
+            InputAction::CopymodeDown => self.copymode_down(ws),
+            InputAction::CopymodeLeft => self.copymode_left(ws),
+            InputAction::CopymodeRight => self.copymode_right(ws),
+            InputAction::CopymodePageUp => self.copymode_page_up(ws),
+            InputAction::CopymodePageDown => self.copymode_page_down(ws),
+            InputAction::CopymodeHome => self.copymode_home(ws),
+            InputAction::CopymodeEnd => self.copymode_end(ws),
+            InputAction::CopymodeSelect => self.copymode_select(ws),
+            InputAction::CopymodeSelectLine => self.copymode_select_line(ws),
+            InputAction::CopymodeCopy => self.copymode_copy(ws),
+            InputAction::CopymodeExit => self.copymode_exit(ws),
+            InputAction::CopymodeToggle => self.toggle_copymode(ws),
+            InputAction::SearchToggle => self.toggle_search(ws),
+            InputAction::SearchNext => self.search_next(ws),
+            InputAction::SearchPrev => self.search_prev(ws),
+            InputAction::SearchCancel => self.search_cancel(ws),
+            _ => {
+                // Escape, q, Ctrl+C exit copymode
+                match &event.logical_key {
+                    Key::Named(NamedKey::Escape) => self.copymode_exit(ws),
+                    Key::Character(s) if s == "q" || s == "Q" => self.copymode_exit(ws),
+                    Key::Character(s) if s == "c" && self.mods.state().control_key() => self.copymode_exit(ws),
+                    _ => {}
+                }
+            }
+        }
+    }
+    
+    // ---- Rename ----
+    
+    /// Ctrl+Shift+R: start editing the active tab's title.
+    fn start_rename(&mut self, ws: &mut WindowState) {
+        let (tab, text) = match ws.tabs.active() {
+            Some(tabs) => (
+                ws.tabs.active_index(),
+                tabs.title(),
+            ),
+            None => return,
+        };
+        ws.rename = Some(RenameState {
+            tab,
+            text,
+            fresh: true,
+        });
+        ws.force_draw = true;
+        ws.window.request_redraw();
+    }
+    
+    /// Keyboard input while a rename is live: every key edits the title.
+    fn on_rename_key(&mut self, ws: &mut WindowState, event: &KeyEvent) {
+        enum Next {
+            Commit(String),
+            Cancel,
+            Edit,
+        }
+        
+        if event.state != ElementState::Pressed {
+            return;
+        }
+        let ctrl = self.mods.state().control_key();
+        let next = {
+            let Some(state) = ws.rename.as_mut() else {
+                return;
+            };
+            match &event.logical_key {
+                Key::Named(NamedKey::Enter) => Next::Commit(state.text.trim().to_string()),
+                Key::Named(NamedKey::Escape) => Next::Cancel,
+                Key::Named(NamedKey::Backspace) => {
+                    state.text.pop();
+                    state.fresh = false;
+                    Next::Edit
+                }
+                _ => {
+                    if ctrl {
+                        if let Key::Character(c) = &event.logical_key {
+                            if c.eq_ignore_ascii_case("u") {
+                                state.text.clear();
+                                state.fresh = false;
+                            }
+                        }
+                    } else if let Some(text) = &event.text {
+                        if !text.chars().any(|c| c.is_control()) {
+                            if state.fresh {
+                                state.text.clear();
+                                state.fresh = false;
+                            }
+                            state.text.push_str(text);
+                        }
+                    }
+                    Next::Edit
+                }
+            }
+        };
+        
+        match next {
+            Next::Commit(name) => {
+                let tab = ws.rename.as_ref().map(|s| s.tab).unwrap_or(0);
+                ws.rename = None;
+                if let Some(tabs) = ws.tabs.get_mut(tab) {
+                    tabs.set_pin(if name.is_empty() { None } else { Some(name) });
+                }
+            }
+            Next::Cancel => ws.rename = None,
+            Next::Edit => {}
+        }
+        ws.force_draw = true;
+        ws.window.request_redraw();
+    }
+
+    /// Create a new window with its own renderer and tabs.
+    fn create_window(&mut self, event_loop: &ActiveEventLoop) -> Result<Arc<Window>> {
+        let attrs = apply_window_effects(
+            Window::default_attributes()
+                .with_title("NeoTerm 0.3")
+                .with_inner_size(Renderer::window_logical_size()),
+            &self.cfg,
+        );
+        let window = Arc::new(event_loop.create_window(attrs)?);
+        let window_id = window.id();
+        
+        let renderer = pollster::block_on(Renderer::new(window.clone(), event_loop, &self.cfg));
+        
+        let mut tabs = Tabs::new(&self.cfg, self.proxy.clone(), self.cwd.clone())?;
+        let size = window.inner_size();
+        let scale = window.scale_factor() as f32;
+        let strip = true; // show strip on initial window
+        let (cols, rows) = renderer.grid_size(size.width, size.height, scale, strip);
+        tabs.resize_all(cols, rows);
+        
+        let state = WindowState {
+            window: window.clone(),
+            renderer,
+            tabs,
+            last_titles: Vec::new(),
+            last_active: usize::MAX,
+            blink_timer: Instant::now(),
+            blink_on: true,
+            last_blink_state: true,
+            force_draw: true,
+            last_strip: true,
+            bell_flash_until: None,
+            toast: None,
+            rename: None,
+            search: None,
+            copymode: None,
+            broadcast: false,
+            cursor_pos: None,
+            selecting: false,
+            left_held: false,
+            press_app_mouse: false,
+            anchor: None,
+            click_count: 0,
+            last_click_at: Instant::now(),
+            scroll_drag: None,
+            press_app_middle: false,
+            press_pane: None,
+            press_local: None,
+            split_drag: None,
+            tab_drag: None,
+            pane_drag: None,
+            split_cursor: None,
+        };
+        
+        self.windows.insert(window_id, state);
+        self.setup_config_watch();
+        
+        log::info!(
+            "NeoTerm v0.3 ready: Ctrl+Shift+T new tab, Ctrl+Shift+W close, \
+             Ctrl+Shift+F search, Ctrl+Tab switch, Ctrl+Shift+± font size, Ctrl+Shift+N new window"
+        );
+        
+        Ok(window)
+    }
+
+    /// Create a new window with the same config and working directory as an existing window.
+    fn create_window_with_config(&mut self, event_loop: &ActiveEventLoop) -> Option<Arc<Window>> {
+        let attrs = apply_window_effects(
+            Window::default_attributes()
+                .with_title("NeoTerm 0.3")
+                .with_inner_size(Renderer::window_logical_size()),
+            &self.cfg,
+        );
+        let window = Arc::new(event_loop.create_window(attrs).ok()?);
+        let window_id = window.id();
+        
+        let renderer = pollster::block_on(Renderer::new(window.clone(), event_loop, &self.cfg));
+        
+        let mut tabs = Tabs::new(&self.cfg, self.proxy.clone(), self.cwd.clone())
+            .ok()?;
+        let size = window.inner_size();
+        let scale = window.scale_factor() as f32;
+        let strip = true; // show strip on initial window
+        let (cols, rows) = renderer.grid_size(size.width, size.height, scale, strip);
+        tabs.resize_all(cols, rows);
+        
+        let state = WindowState {
+            window: window.clone(),
+            renderer,
+            tabs,
+            last_titles: Vec::new(),
+            last_active: usize::MAX,
+            blink_timer: Instant::now(),
+            blink_on: true,
+            last_blink_state: true,
+            force_draw: true,
+            last_strip: true,
+            bell_flash_until: None,
+            toast: None,
+            rename: None,
+            search: None,
+            copymode: None,
+            broadcast: false,
+            cursor_pos: None,
+            selecting: false,
+            left_held: false,
+            press_app_mouse: false,
+            anchor: None,
+            click_count: 0,
+            last_click_at: Instant::now(),
+            scroll_drag: None,
+            press_app_middle: false,
+            press_pane: None,
+            press_local: None,
+            split_drag: None,
+            tab_drag: None,
+            pane_drag: None,
+            split_cursor: None,
+        };
+        
+        self.windows.insert(window_id, state);
+        Some(window)
+    }
+
+    /// Handle keyboard input for a specific window.
+    fn handle_keyboard(&mut self, event_loop: &ActiveEventLoop, ws: &mut WindowState, event: &KeyEvent) {
+        // A live rename owns the keyboard: every key edits the
+        // title instead of reaching the shell.
+        if ws.rename.is_some() {
+            self.on_rename_key(ws, event);
+            return;
+        }
+        // A live copymode owns the keyboard: keys navigate/select/copy.
+        if ws.copymode.is_some() && event.state == ElementState::Pressed {
+            self.handle_copymode_key(ws, event);
+            return;
+        }
+        // A live search owns printable keys: they append to the
+        // query instead of reaching the shell. Chrome actions
+        // (Ctrl+Shift+F etc.) still pass through to map_key below.
+        if ws.search.is_some() && event.state == ElementState::Pressed {
+            match &event.logical_key {
+                Key::Named(NamedKey::Backspace) => {
+                    self.search_backspace(ws);
+                    return;
+                }
+                Key::Named(NamedKey::Escape) => {
+                    self.search_cancel(ws);
+                    return;
+                }
+                _ => {}
+            }
+            // Any printable text gets appended to the query.
+            if let Some(text) = &event.text {
+                for c in text.chars() {
+                    if !c.is_control() {
+                        self.search_type_char(ws, c);
+                    }
+                }
+                return;
+            }
+        }
+
+        let alt = ws
+            .tabs
+            .active()
+            .map(|t| t.in_alt_screen())
+            .unwrap_or(false);
+        match input::map_key(event, &self.mods, alt) {
+            InputAction::PtyInput(bytes) => {
+                if let Some(tab) = ws.tabs.active() {
+                    if ws.broadcast {
+                        tab.write_all(&bytes);
+                    } else {
+                        tab.write(&bytes);
+                    }
+                }
+                ws.window.request_redraw();
+            }
+            InputAction::NewTab => {
+                if let Err(e) = ws.tabs.new_tab(&self.cfg) {
+                    log::error!("new tab failed: {e:#}");
+                }
+                ws.window.request_redraw();
+            }
+            InputAction::SplitV => {
+                match ws.tabs.split_active_tab(SplitDir::V, &self.cfg) {
+                    Ok(false) => log::info!("split refused: pane too small"),
+                    Err(e) => log::error!("split failed: {e:#}"),
+                    _ => {}
+                }
+                ws.force_draw = true;
+                ws.window.request_redraw();
+            }
+            InputAction::SplitH => {
+                match ws.tabs.split_active_tab(SplitDir::H, &self.cfg) {
+                    Ok(false) => log::info!("split refused: pane too small"),
+                    Err(e) => log::error!("split failed: {e:#}"),
+                    _ => {}
+                }
+                ws.force_draw = true;
+                ws.window.request_redraw();
+            }
+            InputAction::ClosePane => {
+                ws.tabs.close_active_pane(&self.cfg);
+                ws.force_draw = true;
+                ws.window.request_redraw();
+            }
+            InputAction::FocusPane(dir) => {
+                let moved = ws.tabs.focus_active_tab(dir);
+                if moved {
+                    ws.force_draw = true;
+                    ws.window.request_redraw();
+                }
+            }
+            InputAction::ZoomPane => {
+                ws.tabs.zoom_active_tab();
+                ws.force_draw = true;
+                ws.window.request_redraw();
+            }
+            InputAction::FontZoomIn => self.zoom_font(ws, 1.0),
+            InputAction::FontZoomOut => self.zoom_font(ws, -1.0),
+            InputAction::FontZoomReset => self.reset_font(ws),
+            InputAction::RenameTab => self.start_rename(ws),
+            InputAction::UnpinTab => {
+                let was_pinned = ws
+                    .tabs
+                    .active()
+                    .map(|t| t.pinned())
+                    .unwrap_or(false);
+                ws.tabs.unpin_active();
+                if !was_pinned {
+                    log::info!("tab title was not pinned");
+                }
+                ws.force_draw = true;
+                ws.window.request_redraw();
+            }
+            InputAction::BroadcastToggle => {
+                ws.broadcast = !ws.broadcast;
+                log::info!("broadcast input: {}", if ws.broadcast { "on" } else { "off" });
+                ws.force_draw = true;
+                ws.window.request_redraw();
+            }
+            InputAction::NewWindow => {
+                // Create a new window with the same config and working directory
+                if let Some(new_window) = self.create_window_with_config(event_loop) {
+                    log::info!("created new window: {:?}", new_window.id());
+                }
+            }
+            InputAction::NextTab => {
+                ws.tabs.next();
+                ws.window.request_redraw();
+            }
+            InputAction::PrevTab => {
+                ws.tabs.prev();
+                ws.window.request_redraw();
+            }
+            InputAction::SelectTab(i) => {
+                ws.tabs.select(i);
+                ws.window.request_redraw();
+            }
+            InputAction::Copy => self.do_copy(ws),
+            InputAction::Paste => self.do_paste(ws),
+            InputAction::ScrollPageUp => {
+                if let Some(tab) = ws.tabs.active() {
+                    tab.scroll_page(true);
+                }
+                ws.force_draw = true;
+                ws.window.request_redraw();
+            }
+            InputAction::ScrollPageDown => {
+                if let Some(tab) = ws.tabs.active() {
+                    tab.scroll_page(false);
+                }
+                ws.force_draw = true;
+                ws.window.request_redraw();
+            }
+            InputAction::SearchToggle => self.toggle_search(ws),
+            InputAction::SearchNext => self.search_next(ws),
+            InputAction::SearchPrev => self.search_prev(ws),
+            InputAction::SearchCancel => self.search_cancel(ws),
+            InputAction::CopymodeToggle => self.toggle_copymode(ws),
+            InputAction::CopymodeUp => self.copymode_up(ws),
+            InputAction::CopymodeDown => self.copymode_down(ws),
+            InputAction::CopymodeLeft => self.copymode_left(ws),
+            InputAction::CopymodeRight => self.copymode_right(ws),
+            InputAction::CopymodePageUp => self.copymode_page_up(ws),
+            InputAction::CopymodePageDown => self.copymode_page_down(ws),
+            InputAction::CopymodeHome => self.copymode_home(ws),
+            InputAction::CopymodeEnd => self.copymode_end(ws),
+            InputAction::CopymodeSelect => self.copymode_select(ws),
+            InputAction::CopymodeSelectLine => self.copymode_select_line(ws),
+            InputAction::CopymodeCopy => self.copymode_copy(ws),
+            InputAction::CopymodeExit => self.copymode_exit(ws),
+            InputAction::Ignored => {}
+        }
     }
 }
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.window.is_some() {
+        // Restore session if we have one pending
+        if let Some(session) = self.pending_session.take() {
+            if let Err(e) = restore_session_state(&session, self, event_loop) {
+                log::warn!("Failed to restore session: {}", e);
+                let _ = self.create_window(event_loop);
+            } else {
+                self.session_loaded = true;
+                log::info!("Session restored");
+            }
             return;
         }
-        let attrs = Window::default_attributes()
-            .with_title("NeoTerm 0.3")
-            .with_inner_size(Renderer::window_logical_size());
-        let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
 
-        let renderer = pollster::block_on(Renderer::new(window.clone(), event_loop, &self.cfg));
-
-        let tabs = Tabs::new(&self.cfg, self.proxy.clone(), self.cwd.clone())
-            .expect("spawn initial tab");
-        // Sync initial grid size with window.
-        let size = window.inner_size();
-
-        self.window = Some(window);
-        self.renderer = Some(renderer);
-        self.tabs = Some(tabs);
-        self.setup_config_watch();
-
-        {
-            let (cols, rows) = self.estimate_grid(size.width, size.height);
-            if let Some(t) = self.tabs.as_mut() {
-                t.resize_all(cols, rows);
-            }
+        // Create initial window if none exists.
+        if self.windows.is_empty() {
+            let _ = self.create_window(event_loop);
         }
-        log::info!(
-            "NeoTerm v0.3 ready: Ctrl+Shift+T new tab, Ctrl+Shift+W close, \
-             Ctrl+Shift+F search, Ctrl+Tab switch, Ctrl+Shift+± font size"
-        );
     }
 
     fn window_event(
         &mut self,
         event_loop: &ActiveEventLoop,
-        _id: WindowId,
+        id: WindowId,
         event: WindowEvent,
     ) {
-        match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::ModifiersChanged(m) => {
-                self.mods = m;
+        // Update modifiers from this window (must be before get_mut to avoid borrow issues)
+        if let WindowEvent::ModifiersChanged(m) = &event {
+            self.mods = *m;
+        }
+        
+        // Get or create window state - use remove/insert to avoid borrow checker issues
+        let mut window_state = match self.windows.remove(&id) {
+            Some(ws) => ws,
+            None => {
+                // If window doesn't exist in our map, create it (for new windows)
+                let _ = self.create_window(event_loop);
+                self.windows.remove(&id).expect("just created")
+            }
+        };
+        
+        // Process the event with the window state
+        match &event {
+            WindowEvent::CloseRequested => {
+                // Window is closed, don't reinsert
+                if self.windows.is_empty() {
+                    event_loop.exit();
+                }
+                return;
             }
             WindowEvent::KeyboardInput { event, .. } => {
-                // A live rename owns the keyboard: every key edits the
-                // title instead of reaching the shell.
-                if self.rename.is_some() {
-                    self.on_rename_key(&event);
-                    return;
-                }
-                // A live search owns printable keys: they append to the
-                // query instead of reaching the shell. Chrome actions
-                // (Ctrl+Shift+F etc.) still pass through to map_key below.
-                if self.search.is_some() && event.state == ElementState::Pressed {
-                    match &event.logical_key {
-                        Key::Named(NamedKey::Backspace) => {
-                            self.search_backspace();
-                            return;
-                        }
-                        Key::Named(NamedKey::Escape) => {
-                            self.search_cancel();
-                            return;
-                        }
-                        _ => {}
-                    }
-                    // Any printable text gets appended to the query.
-                    if let Some(text) = &event.text {
-                        for c in text.chars() {
-                            if !c.is_control() {
-                                self.search_type_char(c);
-                            }
-                        }
-                        return;
-                    }
-                }
-                let alt = self
-                    .tabs
-                    .as_ref()
-                    .and_then(|t| t.active())
-                    .map(|t| t.in_alt_screen())
-                    .unwrap_or(false);
-                match input::map_key(&event, &self.mods, alt) {
-                    InputAction::PtyInput(bytes) => {
-                        if let Some(tabs) = self.tabs.as_ref() {
-                            if let Some(tab) = tabs.active() {
-                                if self.broadcast {
-                                    tab.write_all(&bytes);
-                                } else {
-                                    tab.write(&bytes);
-                                }
-                            }
-                        }
-                        if let Some(w) = self.window.as_ref() {
-                            w.request_redraw();
-                        }
-                    }
-                    InputAction::NewTab => {
-                        if let Some(tabs) = self.tabs.as_mut() {
-                            if let Err(e) = tabs.new_tab(&self.cfg) {
-                                log::error!("new tab failed: {e:#}");
-                            }
-                        }
-                        if let Some(w) = self.window.as_ref() {
-                            w.request_redraw();
-                        }
-                    }
-                    InputAction::SplitV => {
-                        if let Some(tabs) = self.tabs.as_mut() {
-                            match tabs.split_active_tab(SplitDir::V, &self.cfg) {
-                                Ok(false) => log::info!("split refused: pane too small"),
-                                Err(e) => log::error!("split failed: {e:#}"),
-                                _ => {}
-                            }
-                        }
-                        self.force_draw = true;
-                        self.request_redraw();
-                    }
-                    InputAction::SplitH => {
-                        if let Some(tabs) = self.tabs.as_mut() {
-                            match tabs.split_active_tab(SplitDir::H, &self.cfg) {
-                                Ok(false) => log::info!("split refused: pane too small"),
-                                Err(e) => log::error!("split failed: {e:#}"),
-                                _ => {}
-                            }
-                        }
-                        self.force_draw = true;
-                        self.request_redraw();
-                    }
-                    InputAction::ClosePane => {
-                        if let Some(tabs) = self.tabs.as_mut() {
-                            tabs.close_active_pane(&self.cfg);
-                        }
-                        self.force_draw = true;
-                        self.request_redraw();
-                    }
-                    InputAction::FocusPane(dir) => {
-                        let moved = self
-                            .tabs
-                            .as_mut()
-                            .map(|t| t.focus_active_tab(dir))
-                            .unwrap_or(false);
-                        if moved {
-                            self.force_draw = true;
-                            self.request_redraw();
-                        }
-                    }
-                    InputAction::ZoomPane => {
-                        if let Some(tabs) = self.tabs.as_mut() {
-                            tabs.zoom_active_tab();
-                        }
-                        self.force_draw = true;
-                        self.request_redraw();
-                    }
-                    InputAction::FontZoomIn => self.zoom_font(1.0),
-                    InputAction::FontZoomOut => self.zoom_font(-1.0),
-                    InputAction::FontZoomReset => self.reset_font(),
-                    InputAction::RenameTab => self.start_rename(),
-                    InputAction::UnpinTab => {
-                        let was_pinned = self
-                            .tabs
-                            .as_ref()
-                            .and_then(|t| t.active())
-                            .map(|t| t.pinned())
-                            .unwrap_or(false);
-                        if let Some(tabs) = self.tabs.as_mut() {
-                            tabs.unpin_active();
-                        }
-                        if !was_pinned {
-                            log::info!("tab title was not pinned");
-                        }
-                        self.force_draw = true;
-                        self.request_redraw();
-                    }
-                    InputAction::BroadcastToggle => {
-                        self.broadcast = !self.broadcast;
-                        log::info!("broadcast input: {}", if self.broadcast { "on" } else { "off" });
-                        self.force_draw = true;
-                        self.request_redraw();
-                    }
-                    InputAction::NextTab => {
-                        if let Some(tabs) = self.tabs.as_mut() {
-                            tabs.next();
-                        }
-                        if let Some(w) = self.window.as_ref() {
-                            w.request_redraw();
-                        }
-                    }
-                    InputAction::PrevTab => {
-                        if let Some(tabs) = self.tabs.as_mut() {
-                            tabs.prev();
-                        }
-                        if let Some(w) = self.window.as_ref() {
-                            w.request_redraw();
-                        }
-                    }
-                    InputAction::SelectTab(i) => {
-                        if let Some(tabs) = self.tabs.as_mut() {
-                            tabs.select(i);
-                        }
-                        if let Some(w) = self.window.as_ref() {
-                            w.request_redraw();
-                        }
-                    }
-                    InputAction::Copy => self.do_copy(),
-                    InputAction::Paste => self.do_paste(),
-                    InputAction::ScrollPageUp => {
-                        if let Some(tab) = self.tabs.as_ref().and_then(|t| t.active()) {
-                            tab.scroll_page(true);
-                        }
-                        self.force_draw = true;
-                        self.request_redraw();
-                    }
-                    InputAction::ScrollPageDown => {
-                        if let Some(tab) = self.tabs.as_ref().and_then(|t| t.active()) {
-                            tab.scroll_page(false);
-                        }
-                        self.force_draw = true;
-                        self.request_redraw();
-                    }
-                    InputAction::SearchToggle => self.toggle_search(),
-                    InputAction::SearchNext => self.search_next(),
-                    InputAction::SearchPrev => self.search_prev(),
-                    InputAction::SearchCancel => self.search_cancel(),
-                    InputAction::Ignored => {}
+                self.handle_keyboard(event_loop, &mut window_state, event);
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                self.on_cursor_moved(&mut window_state, *position);
+            }
+            WindowEvent::MouseInput { state, button, .. } => {
+                match (button, state) {
+                    (MouseButton::Left, ElementState::Pressed) => self.on_left_press(&mut window_state),
+                    (MouseButton::Left, ElementState::Released) => self.on_left_release(&mut window_state),
+                    (MouseButton::Middle, ElementState::Pressed) => self.on_middle_press(&mut window_state),
+                    (MouseButton::Middle, ElementState::Released) => self.on_middle_release(&mut window_state),
+                    _ => {}
                 }
             }
-            WindowEvent::CursorMoved { position, .. } => self.on_cursor_moved(position),
-            WindowEvent::MouseInput { state, button, .. } => match (button, state) {
-                (MouseButton::Left, ElementState::Pressed) => self.on_left_press(),
-                (MouseButton::Left, ElementState::Released) => self.on_left_release(),
-                (MouseButton::Middle, ElementState::Pressed) => self.on_middle_press(),
-                (MouseButton::Middle, ElementState::Released) => self.on_middle_release(),
-                _ => {}
-            },
-            WindowEvent::MouseWheel { delta, .. } => self.on_wheel(delta),
+            WindowEvent::MouseWheel { delta, .. } => {
+                self.on_wheel(&mut window_state, *delta);
+            }
             WindowEvent::Resized(size) => {
-                if let Some(r) = self.renderer.as_mut() {
-                    r.resize(size.width, size.height);
-                }
-                let (cols, rows) = self.estimate_grid(size.width, size.height);
-                if let Some(t) = self.tabs.as_mut() {
-                    t.resize_all(cols, rows);
-                }
-                // Resize clears renderer caches: force the next present.
-                self.force_draw = true;
-                if let Some(w) = self.window.as_ref() {
-                    w.request_redraw();
-                }
+                self.on_resized(&mut window_state, *size);
             }
             WindowEvent::RedrawRequested => {
-                let Some(tabs) = self.tabs.as_ref() else {
-                    return;
-                };
-                let titles = self.tab_titles();
-                let active = tabs.active_index();
-                let hover = self.hovered_tab();
-                let blink = self.blink_on;
-                let strip = self.strip_on();
-                // Drain reader wakeups + damage; skip the whole present when
-                // nothing changed since the last frame.
-                let pty_dirty = tabs.take_dirty();
-                let term_damaged = tabs
-                    .active()
-                    .map(|tab| tab.take_damage())
-                    .unwrap_or(true);
-                let ui_changed = titles != self.last_titles
-                    || active != self.last_active
-                    || blink != self.last_blink_on
-                    || self.force_draw;
-                if !(pty_dirty || term_damaged || ui_changed) {
-                    return;
-                }
-                if let (Some(r), Some(t)) =
-                    (self.renderer.as_mut(), self.tabs.as_ref())
-                {
-                    // All panes of the ACTIVE tab (inactive tabs don't draw).
-                    // The focused pane blinks its cursor; unfocused panes
-                    // show a steady one so the prompt stays locatable.
-                    let fg = self.cfg.fg_rgb();
-                    let bg = self.cfg.bg_rgb();
-                    let blink = self.blink_on;
-                    let mut panes = Vec::new();
-                    let mut divs = Vec::new();
-                    if let Some(tab) = t.active() {
-                        let layout = tab.layout();
-                        let focus = tab.active_id();
-                        // Search highlights: grid line -> viewport row
-                        // mapping (grid_line = row_idx - offset, so
-                        // row_idx = grid_line + offset).
-                        let search_rows = self.search.as_ref().and_then(|s| {
-                            if s.matches().is_empty() {
-                                None
-                            } else {
-                                let offset = tab.display_offset() as i32;
-                                let (_, rows) = tab.grid_size();
-                                let highlight = Self::search_highlight_rgb();
-                                Some((s, offset, rows as i32, highlight))
-                            }
-                        });
-                        for (id, rect) in layout.panes {
-                            if let Some(pane) = tab.pane(id) {
-                                let cursor_on = if id == focus { blink } else { true };
-                                let (mut rows, cursor) =
-                                    pane.rendered_rows(fg, bg, cursor_on);
-                                // Apply search match highlights to visible rows.
-                                if let Some((state, offset, rows_cnt, highlight)) =
-                                    search_rows.as_ref()
-                                {
-                                    if id == focus {
-                                        for m in state.matches() {
-                                            let vrow = m.line + offset;
-                                            if vrow >= 0 && vrow < *rows_cnt {
-                                                let row = &mut rows[vrow as usize];
-                                                let rgb = *highlight;
-                                                row.bg_rects.push((
-                                                    m.col_start,
-                                                    m.col_end.saturating_sub(1),
-                                                    rgb,
-                                                ));
-                                            }
-                                        }
-                                    }
-                                }
-                                panes.push(PaneDraw {
-                                    id,
-                                    rect,
-                                    rows,
-                                    cursor,
-                                    focused: id == focus,
-                                });
-                            }
-                        }
-                        divs = layout
-                            .dividers
-                            .into_iter()
-                            .map(|(_, r)| r)
-                            .collect();
-                    }
-                    let scroll = t
-                        .active()
-                        .map(|tab| {
-                            let (_, rows) = tab.grid_size();
-                            let pane = tab.layout().panes.iter().find(|(id, _)| *id == tab.active_id()).map(|(_, r)| *r);
-                            ScrollState {
-                                history: tab.history_size(),
-                                offset: tab.display_offset(),
-                                rows,
-                                pane,
-                            }
-                        })
-                        .unwrap_or(ScrollState {
-                            history: 0,
-                            offset: 0,
-                            rows: 24,
-                            pane: None,
-                        });
-                    // Visual bell: tint the body while the flash runs.
-                    let flash = self
-                        .bell_flash_until
-                        .map(|until| Instant::now() < until)
-                        .unwrap_or(false);
-                    r.set_flash(flash);
-                    r.draw(
-                        &titles,
-                        t.active_index(),
-                        hover,
-                        self.toast.as_ref().map(|(text, _)| text.as_str()),
-                        &panes,
-                        &divs,
-                        scroll,
-                        strip,
-                    );
-                }
-                self.last_titles = titles;
-                self.last_active = active;
-                self.last_blink_on = blink;
-                self.force_draw = false;
+                self.on_redraw_requested(&mut window_state);
             }
             _ => {}
         }
+        
+        // Reinsert the window state
+        self.windows.insert(id, window_state);
     }
-
+    
     /// PTY-reader wakeups land here (coalesced per output burst).
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: ()) {
-        if let Some(w) = self.window.as_ref() {
-            w.request_redraw();
+        for ws in self.windows.values() {
+            ws.window.request_redraw();
         }
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.poll_config_reload();
-        // Strip show/hide reflows the grid (body reclaims the strip
-        // height), same as a window resize. Runs here (no live borrows)
-        // rather than in the redraw arm.
-        if self.strip_on() != self.last_strip {
-            self.last_strip = self.strip_on();
-            let grid = self.window.as_ref().map(|w| {
-                let s = w.inner_size();
-                self.estimate_grid(s.width, s.height)
-            });
-            if let (Some((cols, rows)), Some(t)) = (grid, self.tabs.as_mut()) {
-                t.resize_all(cols, rows);
+        
+        let now = Instant::now();
+        let mut earliest_deadline = now + Duration::from_millis(500); // blink deadline
+        let mut any_window_active = false;
+        
+        // Collect window IDs first to avoid borrow checker issues
+        let window_ids: Vec<WindowId> = self.windows.keys().copied().collect();
+        
+        for id in window_ids {
+            any_window_active = true;
+            
+            // Get mutable access to this window
+            let Some(ws) = self.windows.get_mut(&id) else { continue };
+            
+            // Strip show/hide reflows the grid (body reclaims the strip
+            // height), same as a window resize. Runs here (no live borrows)
+            // rather than in the redraw arm.
+            let strip_on = Self::strip_on(&self.cfg.tab_bar, ws);
+            if strip_on != ws.last_strip {
+                ws.last_strip = strip_on;
+                let size = ws.window.inner_size();
+                let (cols, rows) = Self::estimate_grid(&self.cfg.tab_bar, ws, size.width, size.height);
+                ws.tabs.resize_all(cols, rows);
+                ws.force_draw = true;
+                ws.window.request_redraw();
             }
-            self.force_draw = true;
-            self.request_redraw();
-        }
-        // Reap tabs whose shells exited (`exit` closes the tab). Runs on
-        // every wake, so no dead tab lingers even if its wakeup coalesced.
-        // Last tab out quits the app.
-        let (reaped, empty) = match self.tabs.as_mut() {
-            Some(tabs) => {
-                let reaped = tabs.reap_dead();
-                (reaped, tabs.len() == 0)
+            
+            // Reap tabs whose shells exited (`exit` closes the tab). Runs on
+            // every wake, so no dead tab lingers even if its wakeup coalesced.
+            // Last tab out quits the app.
+            let (reaped, empty) = {
+                let reaped = ws.tabs.reap_dead();
+                (reaped, ws.tabs.len() == 0)
+            };
+            if reaped {
+                ws.force_draw = true;
+                ws.window.request_redraw();
             }
-            None => (false, false),
-        };
-        if reaped {
-            self.force_draw = true;
-            self.request_redraw();
+            if empty {
+                // This window has no tabs - close it
+                // Note: we can't remove from self.windows here because we're iterating
+                // We'll handle this in window_event on CloseRequested instead
+            }
+            
+            // Toast: expire it and repaint the strip without it.
+            if let Some((_, until)) = ws.toast {
+                if now >= until {
+                    ws.toast = None;
+                    ws.force_draw = true;
+                    ws.window.request_redraw();
+                } else {
+                    earliest_deadline = earliest_deadline.min(until);
+                }
+            }
+            
+            // Visual bell: a BEL from any pane flashes the body briefly. The
+            // flag is drained even when the bell is disabled, so it never
+            // lingers.
+            let rang = ws.tabs.take_bell();
+            if rang {
+                log::debug!("bell: detected (enabled={})", self.cfg.bell_enabled());
+            }
+            if rang && self.cfg.bell_enabled() {
+                ws.bell_flash_until = Some(now + Duration::from_millis(180));
+                ws.force_draw = true;
+                ws.window.request_redraw();
+            }
+            // Flash over: paint the normal background again.
+            if let Some(until) = ws.bell_flash_until {
+                if now >= until {
+                    ws.bell_flash_until = None;
+                    ws.force_draw = true;
+                    ws.window.request_redraw();
+                } else {
+                    earliest_deadline = earliest_deadline.min(until);
+                }
+            }
+            
+            // Cursor blink at ~2Hz.
+            if ws.blink_timer.elapsed() >= Duration::from_millis(500) {
+                ws.blink_timer = now;
+                ws.blink_on = !ws.blink_on;
+                ws.window.request_redraw();
+                earliest_deadline = earliest_deadline.min(now + Duration::from_millis(500));
+            } else {
+                let blink_deadline = ws.blink_timer + Duration::from_millis(500);
+                earliest_deadline = earliest_deadline.min(blink_deadline);
+            }
         }
-        if empty {
+        
+        if !any_window_active {
             event_loop.exit();
             return;
         }
-        // Toast: expire it and repaint the strip without it.
-        if let Some((_, until)) = self.toast {
-            if Instant::now() >= until {
-                self.toast = None;
-                self.force_draw = true;
-                self.request_redraw();
-            }
-        }
-        // Visual bell: a BEL from any pane flashes the body briefly. The
-        // flag is drained even when the bell is disabled, so it never
-        // lingers.
-        let rang = self.tabs.as_ref().map(|t| t.take_bell()).unwrap_or(false);
-        if rang {
-            log::debug!("bell: detected (enabled={})", self.cfg.bell_enabled());
-        }
-        if rang && self.cfg.bell_enabled() {
-            self.bell_flash_until = Some(Instant::now() + Duration::from_millis(180));
-            self.force_draw = true;
-            self.request_redraw();
-        }
-        // Flash over: paint the normal background again.
-        if let Some(until) = self.bell_flash_until {
-            if Instant::now() >= until {
-                self.bell_flash_until = None;
-                self.force_draw = true;
-                self.request_redraw();
-            }
-        }
-        // Cursor blink at ~2Hz. No unconditional redraw/sleep anymore:
-        // the loop parks in the OS until input, PTY output (user_event),
-        // resize, or the next blink deadline wakes it.
-        if self.last_blink.elapsed() >= Duration::from_millis(500) {
-            self.blink_on = !self.blink_on;
-            self.last_blink = Instant::now();
-            if let Some(w) = self.window.as_ref() {
-                w.request_redraw();
-            }
-        }
-        // Wake for the blink deadline, or earlier when a bell flash is
-        // still running (so the flash can be cleared on time).
-        let blink_deadline = self.last_blink + Duration::from_millis(500);
-        let deadline = match self.bell_flash_until {
-            Some(until) => until.min(blink_deadline),
-            None => blink_deadline,
-        };
-        event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
+        
+        event_loop.set_control_flow(ControlFlow::WaitUntil(earliest_deadline));
     }
 }
 
@@ -2012,7 +2249,33 @@ fn main() -> Result<()> {
 
     let proxy = event_loop.create_proxy();
     let mut app = App::new(cfg, proxy, cwd);
+
+    // Try to load session for restoration in `resumed`
+    let session_path = session_file_path();
+    if session_path.exists() {
+        match SessionState::load(&session_path) {
+            Ok(session) => {
+                app.pending_session = Some(session);
+                log::info!("Session loaded from {:?}, will restore on startup", session_path);
+            }
+            Err(e) => {
+                log::warn!("Failed to load session file: {}", e);
+            }
+        }
+    }
+
     event_loop.run_app(&mut app).expect("run app");
+
+    // Save session on exit if we loaded one
+    if app.session_loaded {
+        let session = build_session_state(&app);
+        if let Err(e) = session.save(&session_path) {
+            log::warn!("Failed to save session: {}", e);
+        } else {
+            log::info!("Session saved to {:?}", session_path);
+        }
+    }
+
     Ok(())
 }
 
