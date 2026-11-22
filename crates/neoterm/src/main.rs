@@ -1423,8 +1423,63 @@ impl App {
         );
     }
 
+    /// Create a new window with the same config and working directory as an existing window.
+    fn create_window_with_config(&mut self, event_loop: &ActiveEventLoop) -> Option<Arc<Window>> {
+        let attrs = Window::default_attributes()
+            .with_title("NeoTerm 0.3")
+            .with_inner_size(Renderer::window_logical_size());
+        let window = Arc::new(event_loop.create_window(attrs).ok()?);
+        let window_id = window.id();
+        
+        let renderer = pollster::block_on(Renderer::new(window.clone(), event_loop, &self.cfg));
+        
+        let mut tabs = Tabs::new(&self.cfg, self.proxy.clone(), self.cwd.clone())
+            .ok()?;
+        let size = window.inner_size();
+        let scale = window.scale_factor() as f32;
+        let strip = true; // show strip on initial window
+        let (cols, rows) = renderer.grid_size(size.width, size.height, scale, strip);
+        tabs.resize_all(cols, rows);
+        
+        let state = WindowState {
+            window: window.clone(),
+            renderer,
+            tabs,
+            last_titles: Vec::new(),
+            last_active: usize::MAX,
+            blink_timer: Instant::now(),
+            blink_on: true,
+            last_blink_state: true,
+            force_draw: true,
+            last_strip: true,
+            bell_flash_until: None,
+            toast: None,
+            rename: None,
+            search: None,
+            broadcast: false,
+            cursor_pos: None,
+            selecting: false,
+            left_held: false,
+            press_app_mouse: false,
+            anchor: None,
+            click_count: 0,
+            last_click_at: Instant::now(),
+            scroll_drag: None,
+            press_app_middle: false,
+            press_pane: None,
+            press_local: None,
+            split_drag: None,
+            tab_drag: None,
+            pane_drag: None,
+            split_cursor: None,
+        };
+        
+        self.windows.insert(window_id, state);
+        Some(window)
+    }
+
     /// Handle keyboard input for a specific window.
-    fn handle_keyboard(&mut self, ws: &mut WindowState, event: &KeyEvent) {
+    fn handle_keyboard(&mut self, event_loop: &ActiveEventLoop, ws: &mut WindowState, event: &KeyEvent) {
         // A live rename owns the keyboard: every key edits the
         // title instead of reaching the shell.
         if ws.rename.is_some() {
@@ -1537,6 +1592,12 @@ impl App {
                 ws.force_draw = true;
                 ws.window.request_redraw();
             }
+            InputAction::NewWindow => {
+                // Create a new window with the same config and working directory
+                if let Some(new_window) = self.create_window_with_config(event_loop) {
+                    log::info!("created new window: {:?}", new_window.id());
+                }
+            }
             InputAction::NextTab => {
                 ws.tabs.next();
                 ws.window.request_redraw();
@@ -1613,7 +1674,7 @@ impl ApplicationHandler for App {
                 return;
             }
             WindowEvent::KeyboardInput { event, .. } => {
-                self.handle_keyboard(&mut window_state, event);
+                self.handle_keyboard(event_loop, &mut window_state, event);
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.on_cursor_moved(&mut window_state, *position);

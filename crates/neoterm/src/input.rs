@@ -44,6 +44,8 @@ pub enum InputAction {
     UnpinTab,
     /// Toggle broadcast input mode (send keystrokes to all panes).
     BroadcastToggle,
+    /// Create a new OS window.
+    NewWindow,
     Ignored,
 }
 
@@ -140,7 +142,7 @@ fn chrome_action(key: &Key, mods: ModifiersState) -> Option<InputAction> {
             Key::Character(s) => match s.to_uppercase().as_str() {
                 "T" => return Some(InputAction::NewTab),
                 "W" => return Some(InputAction::ClosePane),
-                "N" => return Some(InputAction::NextTab),
+                "N" => return Some(InputAction::NewWindow),
                 "P" => return Some(InputAction::PrevTab),
                 "C" => return Some(InputAction::Copy),
                 "V" => return Some(InputAction::Paste),
