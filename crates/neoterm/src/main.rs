@@ -1,4 +1,5 @@
 mod config;
+mod graphics;
 mod input;
 mod mouse;
 mod renderer;
@@ -101,6 +102,7 @@ struct WindowState {
     toast: Option<(String, Instant)>,
     rename: Option<RenameState>,
     search: Option<SearchState>,
+    copymode: Option<CopymodeState>,
     broadcast: bool,
     // Mouse state
     cursor_pos: Option<PhysicalPosition<f64>>,
@@ -159,6 +161,20 @@ struct RenameState {
     /// The prefilled title is still untouched: the first keystroke
     /// replaces it (like selected text in a rename field).
     fresh: bool,
+}
+
+/// Vi-style copy mode state.
+struct CopymodeState {
+    /// Origin pane and cursor position when entering copymode.
+    pane: PaneId,
+    /// Cursor position within the grid (row from top of viewport, col).
+    cursor: (usize, usize),
+    /// Selection anchor (row, col) if selecting, else None.
+    anchor: Option<(usize, usize)>,
+    /// Whether we're in line selection mode (V).
+    line_mode: bool,
+    /// Scroll offset from top of history (0 = viewport bottom).
+    scroll_offset: usize,
 }
 
 impl App {
@@ -1032,6 +1048,36 @@ impl App {
                             }
                         }
                     }
+                    // Apply copymode selection highlights to visible rows.
+                    if let Some(copymode) = &ws.copymode {
+                        if copymode.pane == id && copymode.anchor.is_some() {
+                            let anchor = copymode.anchor.unwrap();
+                            let cursor = copymode.cursor;
+                            let cols = if let Ok(term) = pane.term.lock() { term.columns().max(1) as usize } else { 80 };
+                            let (start_row, end_row, start_col, end_col) = if copymode.line_mode {
+                                let start = anchor.0.min(cursor.0);
+                                let end = anchor.0.max(cursor.0);
+                                (start, end, 0, cols - 1)
+                            } else {
+                                let start_r = anchor.0.min(cursor.0);
+                                let end_r = anchor.0.max(cursor.0);
+                                let start_c = anchor.1.min(cursor.1);
+                                let end_c = anchor.1.max(cursor.1);
+                                (start_r, end_r, start_c, end_c)
+                            };
+                            let highlight = Self::copymode_highlight_rgb();
+                            for vrow in start_row..=end_row {
+                                if vrow < rows.len() {
+                                    let row = &mut rows[vrow];
+                                    let sc = if copymode.line_mode { 0 } else { start_col };
+                                    let ec = if copymode.line_mode { row.text.chars().count() } else { end_col };
+                                    if sc <= ec {
+                                        row.bg_rects.push((sc, ec, highlight));
+                                    }
+                                }
+                            }
+                        }
+                    }
                     panes.push(PaneDraw {
                         id,
                         rect,
@@ -1327,6 +1373,298 @@ impl App {
         (255, 200, 50)
     }
     
+    /// Return a copymode selection highlight color (linearized blue).
+    fn copymode_highlight_rgb() -> (u8, u8, u8) {
+        (100, 150, 255)
+    }
+    
+    // ---- Copymode (Vi-style selection) ----
+    
+    /// Ctrl+Shift+Space: toggle Vi-style copy mode.
+    fn toggle_copymode(&mut self, ws: &mut WindowState) {
+        if ws.copymode.is_some() {
+            ws.copymode = None;
+            log::info!("copymode: off");
+        } else {
+            let Some(tab) = ws.tabs.active() else { return };
+            let pane_id = tab.active_id();
+            let Some(pane) = tab.pane(pane_id) else { return };
+            let Ok(term) = pane.term.lock() else { return };
+            let cursor = term.grid().cursor.point;
+            let cols = term.columns().max(1) as usize;
+            let rows = term.screen_lines().max(1) as usize;
+            // Convert cursor to viewport-relative coordinates
+            let display_offset = term.grid().display_offset() as i32;
+            let cursor_row = cursor.line.0 as i32 - display_offset;
+            let cursor_col = cursor.column.0 as usize;
+            let cursor_row = cursor_row.clamp(0, rows as i32 - 1) as usize;
+            ws.copymode = Some(CopymodeState {
+                pane: pane_id,
+                cursor: (cursor_row, cursor_col),
+                anchor: None,
+                line_mode: false,
+                scroll_offset: 0,
+            });
+            log::info!("copymode: on");
+        }
+        ws.force_draw = true;
+        ws.window.request_redraw();
+    }
+    
+    /// Exit copymode without copying.
+    fn copymode_exit(&mut self, ws: &mut WindowState) {
+        ws.copymode = None;
+        log::info!("copymode: off");
+        ws.force_draw = true;
+        ws.window.request_redraw();
+    }
+    
+    /// Move cursor up in copymode.
+    fn copymode_up(&mut self, ws: &mut WindowState) {
+        let history = self.get_history_size(ws);
+        if let Some(state) = ws.copymode.as_mut() {
+            if state.cursor.0 > 0 {
+                state.cursor.0 -= 1;
+            } else if state.scroll_offset < history {
+                state.scroll_offset += 1;
+            }
+            if state.anchor.is_some() {
+                // Extend selection
+            }
+        }
+        ws.force_draw = true;
+        ws.window.request_redraw();
+    }
+    
+    /// Move cursor down in copymode.
+    fn copymode_down(&mut self, ws: &mut WindowState) {
+        let history = self.get_history_size(ws);
+        let max_row = ws.renderer.grid_size(ws.window.inner_size().width, ws.window.inner_size().height, ws.window.scale_factor() as f32, true).1 as usize;
+        if let Some(state) = ws.copymode.as_mut() {
+            if state.cursor.0 < max_row.saturating_sub(1) {
+                state.cursor.0 += 1;
+            } else if state.scroll_offset > 0 {
+                state.scroll_offset -= 1;
+            }
+            if state.anchor.is_some() {
+                // Extend selection
+            }
+        }
+        ws.force_draw = true;
+        ws.window.request_redraw();
+    }
+    
+    /// Move cursor left in copymode.
+    fn copymode_left(&mut self, ws: &mut WindowState) {
+        if let Some(state) = ws.copymode.as_mut() {
+            if state.cursor.1 > 0 {
+                state.cursor.1 -= 1;
+            }
+            if state.anchor.is_some() {
+                // Extend selection
+            }
+        }
+        ws.force_draw = true;
+        ws.window.request_redraw();
+    }
+    
+    /// Move cursor right in copymode.
+    fn copymode_right(&mut self, ws: &mut WindowState) {
+        let cols = ws.renderer.grid_size(ws.window.inner_size().width, ws.window.inner_size().height, ws.window.scale_factor() as f32, true).0 as usize;
+        if let Some(state) = ws.copymode.as_mut() {
+            if state.cursor.1 + 1 < cols {
+                state.cursor.1 += 1;
+            }
+            if state.anchor.is_some() {
+                // Extend selection
+            }
+        }
+        ws.force_draw = true;
+        ws.window.request_redraw();
+    }
+    
+    /// Page up in copymode.
+    fn copymode_page_up(&mut self, ws: &mut WindowState) {
+        let viewport_rows = ws.renderer.grid_size(ws.window.inner_size().width, ws.window.inner_size().height, ws.window.scale_factor() as f32, true).1 as usize;
+        let history = self.get_history_size(ws);
+        if let Some(state) = ws.copymode.as_mut() {
+            state.scroll_offset = (state.scroll_offset + viewport_rows / 2).min(history);
+        }
+        ws.force_draw = true;
+        ws.window.request_redraw();
+    }
+    
+    /// Page down in copymode.
+    fn copymode_page_down(&mut self, ws: &mut WindowState) {
+        let viewport_rows = ws.renderer.grid_size(ws.window.inner_size().width, ws.window.inner_size().height, ws.window.scale_factor() as f32, true).1 as usize;
+        if let Some(state) = ws.copymode.as_mut() {
+            state.scroll_offset = state.scroll_offset.saturating_sub(viewport_rows / 2);
+        }
+        ws.force_draw = true;
+        ws.window.request_redraw();
+    }
+    
+    /// Home in copymode (beginning of line).
+    fn copymode_home(&mut self, ws: &mut WindowState) {
+        if let Some(state) = ws.copymode.as_mut() {
+            state.cursor.1 = 0;
+        }
+        ws.force_draw = true;
+        ws.window.request_redraw();
+    }
+    
+    /// End in copymode (end of line).
+    fn copymode_end(&mut self, ws: &mut WindowState) {
+        let cols = ws.renderer.grid_size(ws.window.inner_size().width, ws.window.inner_size().height, ws.window.scale_factor() as f32, true).0 as usize;
+        if let Some(state) = ws.copymode.as_mut() {
+            state.cursor.1 = cols.saturating_sub(1);
+        }
+        ws.force_draw = true;
+        ws.window.request_redraw();
+    }
+    
+    /// Start/extend character selection in copymode (v).
+    fn copymode_select(&mut self, ws: &mut WindowState) {
+        if let Some(state) = ws.copymode.as_mut() {
+            if state.anchor.is_none() {
+                state.anchor = Some(state.cursor);
+            }
+        }
+        ws.force_draw = true;
+        ws.window.request_redraw();
+    }
+    
+    /// Start/extend line selection in copymode (V).
+    fn copymode_select_line(&mut self, ws: &mut WindowState) {
+        if let Some(state) = ws.copymode.as_mut() {
+            state.line_mode = true;
+            if state.anchor.is_none() {
+                state.anchor = Some((state.cursor.0, 0));
+            }
+        }
+        ws.force_draw = true;
+        ws.window.request_redraw();
+    }
+    
+    /// Copy selection and exit copymode (y).
+    fn copymode_copy(&mut self, ws: &mut WindowState) {
+        if let Some(state) = ws.copymode.take() {
+            if let Some(tab) = ws.tabs.active() {
+                if let Some(pane) = tab.pane(state.pane) {
+                    if let Ok(term) = pane.term.lock() {
+                        let text = if let Some(anchor) = state.anchor {
+                            let (anchor_row, anchor_col) = anchor;
+                            let (cursor_row, cursor_col) = state.cursor;
+                            let (start_row, end_row, start_col, end_col) = if state.line_mode {
+                                // Line mode: select full lines from anchor to cursor
+                                let start = anchor_row.min(cursor_row);
+                                let end = anchor_row.max(cursor_row);
+                                (start, end, 0, term.columns().max(1) as usize - 1)
+                            } else {
+                                // Character mode: select rectangle from anchor to cursor
+                                let start_r = anchor_row.min(cursor_row);
+                                let end_r = anchor_row.max(cursor_row);
+                                let start_c = anchor_col.min(cursor_col);
+                                let end_c = anchor_col.max(cursor_col);
+                                (start_r, end_r, start_c, end_c)
+                            };
+                            // Convert viewport-relative rows to grid line numbers
+                            let display_offset = term.grid().display_offset() as i32;
+                            let start_line = (start_row as i32 + display_offset) as i32;
+                            let end_line = (end_row as i32 + display_offset) as i32;
+                            let grid_start = Point::new(Line(start_line), Column(start_col));
+                            let grid_end = Point::new(Line(end_line), Column(end_col));
+                            term.bounds_to_string(grid_start, grid_end)
+                        } else {
+                            String::new()
+                        };
+                        if !text.trim().is_empty() {
+                            if let Some(cb) = self.clipboard() {
+                                if let Err(e) = cb.set().text(text) {
+                                    log::error!("copymode copy failed: {e}");
+                                } else {
+                                    log::info!("copymode: copied");
+                                }
+                            }
+                        } else {
+                            log::info!("copymode: no selection to copy");
+                        }
+                    }
+                }
+            }
+        }
+        ws.force_draw = true;
+        ws.window.request_redraw();
+    }
+    
+    /// Get history size for the active pane.
+    fn get_history_size(&self, ws: &WindowState) -> usize {
+        if let Some(tab) = ws.tabs.active() {
+            if let Some(pane) = tab.pane(tab.active_id()) {
+                if let Ok(term) = pane.term.lock() {
+                    return term.grid().history_size();
+                }
+            }
+        }
+        0
+    }
+    
+    /// Handle keyboard input while copymode is active.
+    fn handle_copymode_key(&mut self, ws: &mut WindowState, event: &KeyEvent) {
+        use input::InputAction;
+        use winit::keyboard::{Key, NamedKey};
+        use winit::event::ElementState;
+        
+        if event.state != ElementState::Pressed {
+            return;
+        }
+        
+        let alt = ws
+            .tabs
+            .active()
+            .map(|t| t.in_alt_screen())
+            .unwrap_or(false);
+        
+        // Allow chrome actions to pass through (e.g., Ctrl+Shift+F for search)
+        if let Some(action) = input::chrome_action(&event.logical_key, self.mods.state()) {
+            match action {
+                InputAction::SearchToggle | InputAction::CopymodeToggle => {
+                    // These are handled by map_key below
+                }
+                _ => return, // Other chrome actions don't apply in copymode
+            }
+        }
+        
+        match input::map_key(event, &self.mods, alt) {
+            InputAction::CopymodeUp => self.copymode_up(ws),
+            InputAction::CopymodeDown => self.copymode_down(ws),
+            InputAction::CopymodeLeft => self.copymode_left(ws),
+            InputAction::CopymodeRight => self.copymode_right(ws),
+            InputAction::CopymodePageUp => self.copymode_page_up(ws),
+            InputAction::CopymodePageDown => self.copymode_page_down(ws),
+            InputAction::CopymodeHome => self.copymode_home(ws),
+            InputAction::CopymodeEnd => self.copymode_end(ws),
+            InputAction::CopymodeSelect => self.copymode_select(ws),
+            InputAction::CopymodeSelectLine => self.copymode_select_line(ws),
+            InputAction::CopymodeCopy => self.copymode_copy(ws),
+            InputAction::CopymodeExit => self.copymode_exit(ws),
+            InputAction::CopymodeToggle => self.toggle_copymode(ws),
+            InputAction::SearchToggle => self.toggle_search(ws),
+            InputAction::SearchNext => self.search_next(ws),
+            InputAction::SearchPrev => self.search_prev(ws),
+            InputAction::SearchCancel => self.search_cancel(ws),
+            _ => {
+                // Escape, q, Ctrl+C exit copymode
+                match &event.logical_key {
+                    Key::Named(NamedKey::Escape) => self.copymode_exit(ws),
+                    Key::Character(s) if s == "q" || s == "Q" => self.copymode_exit(ws),
+                    Key::Character(s) if s == "c" && self.mods.state().control_key() => self.copymode_exit(ws),
+                    _ => {}
+                }
+            }
+        }
+    }
+    
     // ---- Rename ----
     
     /// Ctrl+Shift+R: start editing the active tab's title.
@@ -1443,6 +1781,7 @@ impl App {
             toast: None,
             rename: None,
             search: None,
+            copymode: None,
             broadcast: false,
             cursor_pos: None,
             selecting: false,
@@ -1508,6 +1847,7 @@ impl App {
             toast: None,
             rename: None,
             search: None,
+            copymode: None,
             broadcast: false,
             cursor_pos: None,
             selecting: false,
@@ -1536,6 +1876,11 @@ impl App {
         // title instead of reaching the shell.
         if ws.rename.is_some() {
             self.on_rename_key(ws, event);
+            return;
+        }
+        // A live copymode owns the keyboard: keys navigate/select/copy.
+        if ws.copymode.is_some() && event.state == ElementState::Pressed {
+            self.handle_copymode_key(ws, event);
             return;
         }
         // A live search owns printable keys: they append to the
@@ -1682,6 +2027,19 @@ impl App {
             InputAction::SearchNext => self.search_next(ws),
             InputAction::SearchPrev => self.search_prev(ws),
             InputAction::SearchCancel => self.search_cancel(ws),
+            InputAction::CopymodeToggle => self.toggle_copymode(ws),
+            InputAction::CopymodeUp => self.copymode_up(ws),
+            InputAction::CopymodeDown => self.copymode_down(ws),
+            InputAction::CopymodeLeft => self.copymode_left(ws),
+            InputAction::CopymodeRight => self.copymode_right(ws),
+            InputAction::CopymodePageUp => self.copymode_page_up(ws),
+            InputAction::CopymodePageDown => self.copymode_page_down(ws),
+            InputAction::CopymodeHome => self.copymode_home(ws),
+            InputAction::CopymodeEnd => self.copymode_end(ws),
+            InputAction::CopymodeSelect => self.copymode_select(ws),
+            InputAction::CopymodeSelectLine => self.copymode_select_line(ws),
+            InputAction::CopymodeCopy => self.copymode_copy(ws),
+            InputAction::CopymodeExit => self.copymode_exit(ws),
             InputAction::Ignored => {}
         }
     }
