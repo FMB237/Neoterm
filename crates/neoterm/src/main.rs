@@ -26,6 +26,12 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy}
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{CursorIcon, Window, WindowId};
 
+// Platform-specific window attributes for transparency/blur
+#[cfg(target_os = "windows")]
+use winit::platform::windows::WindowAttributesExtWindows;
+#[cfg(target_os = "macos")]
+use winit::platform::macos::WindowAttributesExtMacOS;
+
 use config::NeotermConfig;
 use input::InputAction;
 use renderer::{PaneDraw, Renderer, ScrollState};
@@ -34,6 +40,37 @@ use search::{SearchMatch, SearchState};
 use session::{build_session_state, restore_session_state, session_file_path, SessionState};
 use tab::{CellRect, PaneId, SplitDir};
 use tabs::Tabs;
+
+/// Apply transparency and blur settings to window attributes.
+fn apply_window_effects(attrs: winit::window::WindowAttributes, cfg: &NeotermConfig) -> winit::window::WindowAttributes {
+    let mut attrs = attrs;
+    
+    // Apply transparency (0.0 = opaque, >0 = transparent)
+    if cfg.transparency > 0.0 {
+        attrs = attrs.with_transparent(true);
+    }
+    
+    // Apply blur effect based on platform and config
+    if cfg.blur != "none" {
+        #[cfg(target_os = "windows")]
+        {
+            if cfg.blur == "acrylic" || cfg.blur == "auto" {
+                // Windows 11 acrylic blur
+                attrs = attrs.with_blur_behind(true);
+            }
+        }
+        #[cfg(target_os = "macos")]
+        {
+            if cfg.blur == "acrylic" || cfg.blur == "auto" {
+                // macOS vibrancy/blur
+                attrs = attrs.with_titlebar_transparent(true);
+                // Note: Full window vibrancy requires additional NSView setup
+            }
+        }
+    }
+    
+    attrs
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "neoterm", version, about = "NeoTerm v0.3 - GPU terminal")]
@@ -1373,9 +1410,12 @@ impl App {
 
     /// Create a new window with its own renderer and tabs.
     fn create_window(&mut self, event_loop: &ActiveEventLoop) -> Result<Arc<Window>> {
-        let attrs = Window::default_attributes()
-            .with_title("NeoTerm 0.3")
-            .with_inner_size(Renderer::window_logical_size());
+        let attrs = apply_window_effects(
+            Window::default_attributes()
+                .with_title("NeoTerm 0.3")
+                .with_inner_size(Renderer::window_logical_size()),
+            &self.cfg,
+        );
         let window = Arc::new(event_loop.create_window(attrs)?);
         let window_id = window.id();
         
@@ -1434,9 +1474,12 @@ impl App {
 
     /// Create a new window with the same config and working directory as an existing window.
     fn create_window_with_config(&mut self, event_loop: &ActiveEventLoop) -> Option<Arc<Window>> {
-        let attrs = Window::default_attributes()
-            .with_title("NeoTerm 0.3")
-            .with_inner_size(Renderer::window_logical_size());
+        let attrs = apply_window_effects(
+            Window::default_attributes()
+                .with_title("NeoTerm 0.3")
+                .with_inner_size(Renderer::window_logical_size()),
+            &self.cfg,
+        );
         let window = Arc::new(event_loop.create_window(attrs).ok()?);
         let window_id = window.id();
         
