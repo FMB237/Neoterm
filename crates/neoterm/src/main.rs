@@ -3,6 +3,7 @@ mod input;
 mod mouse;
 mod renderer;
 mod search;
+mod session;
 mod tab;
 mod tabs;
 
@@ -30,6 +31,7 @@ use input::InputAction;
 use renderer::{PaneDraw, Renderer, ScrollState};
 use tab::Tab;
 use search::{SearchMatch, SearchState};
+use session::{build_session_state, restore_session_state, session_file_path, SessionState};
 use tab::{CellRect, PaneId, SplitDir};
 use tabs::Tabs;
 
@@ -98,6 +100,10 @@ struct App {
     /// by our process, so this is kept alive for the whole session instead
     /// of opening/closing per operation.
     clipboard: Option<Clipboard>,
+    /// Whether a session was loaded and should be saved on exit.
+    session_loaded: bool,
+    /// Loaded session state to restore in `resumed`.
+    pending_session: Option<SessionState>,
 }
 
 /// Divider drag state. The parent rect never changes under ratio changes,
@@ -130,6 +136,8 @@ impl App {
             _watcher: None,
             proxy,
             clipboard: None,
+            session_loaded: false,
+            pending_session: None,
         }
     }
 
@@ -1364,17 +1372,16 @@ impl App {
     }
 
     /// Create a new window with its own renderer and tabs.
-    fn create_window(&mut self, event_loop: &ActiveEventLoop) {
+    fn create_window(&mut self, event_loop: &ActiveEventLoop) -> Result<Arc<Window>> {
         let attrs = Window::default_attributes()
             .with_title("NeoTerm 0.3")
             .with_inner_size(Renderer::window_logical_size());
-        let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
+        let window = Arc::new(event_loop.create_window(attrs)?);
         let window_id = window.id();
         
         let renderer = pollster::block_on(Renderer::new(window.clone(), event_loop, &self.cfg));
         
-        let mut tabs = Tabs::new(&self.cfg, self.proxy.clone(), self.cwd.clone())
-            .expect("spawn initial tab");
+        let mut tabs = Tabs::new(&self.cfg, self.proxy.clone(), self.cwd.clone())?;
         let size = window.inner_size();
         let scale = window.scale_factor() as f32;
         let strip = true; // show strip on initial window
@@ -1421,6 +1428,8 @@ impl App {
             "NeoTerm v0.3 ready: Ctrl+Shift+T new tab, Ctrl+Shift+W close, \
              Ctrl+Shift+F search, Ctrl+Tab switch, Ctrl+Shift+± font size, Ctrl+Shift+N new window"
         );
+        
+        Ok(window)
     }
 
     /// Create a new window with the same config and working directory as an existing window.
@@ -1637,9 +1646,21 @@ impl App {
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        // Restore session if we have one pending
+        if let Some(session) = self.pending_session.take() {
+            if let Err(e) = restore_session_state(&session, self, event_loop) {
+                log::warn!("Failed to restore session: {}", e);
+                let _ = self.create_window(event_loop);
+            } else {
+                self.session_loaded = true;
+                log::info!("Session restored");
+            }
+            return;
+        }
+
         // Create initial window if none exists.
         if self.windows.is_empty() {
-            self.create_window(event_loop);
+            let _ = self.create_window(event_loop);
         }
     }
 
@@ -1659,7 +1680,7 @@ impl ApplicationHandler for App {
             Some(ws) => ws,
             None => {
                 // If window doesn't exist in our map, create it (for new windows)
-                self.create_window(event_loop);
+                let _ = self.create_window(event_loop);
                 self.windows.remove(&id).expect("just created")
             }
         };
@@ -1827,7 +1848,33 @@ fn main() -> Result<()> {
 
     let proxy = event_loop.create_proxy();
     let mut app = App::new(cfg, proxy, cwd);
+
+    // Try to load session for restoration in `resumed`
+    let session_path = session_file_path();
+    if session_path.exists() {
+        match SessionState::load(&session_path) {
+            Ok(session) => {
+                app.pending_session = Some(session);
+                log::info!("Session loaded from {:?}, will restore on startup", session_path);
+            }
+            Err(e) => {
+                log::warn!("Failed to load session file: {}", e);
+            }
+        }
+    }
+
     event_loop.run_app(&mut app).expect("run app");
+
+    // Save session on exit if we loaded one
+    if app.session_loaded {
+        let session = build_session_state(&app);
+        if let Err(e) = session.save(&session_path) {
+            log::warn!("Failed to save session: {}", e);
+        } else {
+            log::info!("Session saved to {:?}", session_path);
+        }
+    }
+
     Ok(())
 }
 

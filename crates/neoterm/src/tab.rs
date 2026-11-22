@@ -10,6 +10,7 @@ use alacritty_terminal::selection::{Selection, SelectionRange, SelectionType};
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedColor, Rgb};
 use anyhow::{Context, Result};
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
+use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -151,6 +152,8 @@ pub struct Pane {
     /// Last cursor position seen by `take_damage` (stale-cursor detection:
     /// cursor-only moves don't always mark grid damage).
     last_cursor: Mutex<(usize, usize)>,
+    /// Current working directory of the shell (for session restore).
+    cwd: PathBuf,
 }
 
 impl Pane {
@@ -253,6 +256,7 @@ impl Pane {
             bell,
             palette: cfg.theme.palette_rgb(),
             last_cursor: Mutex::new((0, 0)),
+            cwd: cwd.to_path_buf(),
         })
     }
 
@@ -267,6 +271,11 @@ impl Pane {
             .lock()
             .map(|t| t.clone())
             .unwrap_or_default()
+    }
+
+    /// Current working directory of the shell (for session restore).
+    pub fn get_cwd(&self) -> PathBuf {
+        self.cwd.clone()
     }
 
     pub fn write(&self, bytes: &[u8]) {
@@ -496,7 +505,7 @@ pub const MIN_PANE_COLS: usize = 15;
 pub const MIN_PANE_ROWS: usize = 4;
 
 /// Split direction: V = side-by-side (1-column divider), H = stacked.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SplitDir {
     V,
     H,
@@ -878,6 +887,41 @@ impl Tab {
         self.panes.get(&id)
     }
 
+    /// Get all panes.
+    pub fn panes(&self) -> &HashMap<PaneId, Pane> {
+        &self.panes
+    }
+
+    /// Get all pane sizes.
+    pub fn sizes(&self) -> &HashMap<PaneId, (usize, usize)> {
+        &self.sizes
+    }
+
+    /// Get the root of the pane tree.
+    pub fn root(&self) -> &Option<PaneNode> {
+        &self.root
+    }
+
+    /// Get the tab ID.
+    pub fn tab_id(&self) -> usize {
+        self.tab_id
+    }
+
+    /// Get the pinned title.
+    pub fn pinned_title(&self) -> Option<&String> {
+        self.pinned_title.as_ref()
+    }
+
+    /// Get the active pane ID.
+    pub fn active_pane_id(&self) -> PaneId {
+        self.active
+    }
+
+    /// Get the zoomed pane ID.
+    pub fn zoomed_pane_id(&self) -> Option<PaneId> {
+        self.zoomed
+    }
+
     /// Current layout over the stored body area (zoom honored).
     pub fn layout(&self) -> PaneLayout {
         match &self.root {
@@ -1144,6 +1188,39 @@ impl Tab {
         }
         let (cols, rows) = (self.area.cols, self.area.rows);
         self.resize_body(cols, rows);
+    }
+}
+
+/// Session restore methods for Tab.
+impl Tab {
+    /// Set the pinned title.
+    pub fn set_pinned_title(&mut self, title: Option<String>) {
+        self.pinned_title = title;
+    }
+
+    /// Set the active pane ID.
+    pub fn set_active_pane_id(&mut self, id: PaneId) {
+        self.active = id;
+    }
+
+    /// Set the zoomed pane ID.
+    pub fn set_zoomed_pane_id(&mut self, id: Option<PaneId>) {
+        self.zoomed = id;
+    }
+
+    /// Replace all panes (used during session restore).
+    pub fn replace_panes(&mut self, panes: HashMap<PaneId, Pane>) {
+        self.panes = panes;
+    }
+
+    /// Replace all pane sizes (used during session restore).
+    pub fn replace_sizes(&mut self, sizes: HashMap<PaneId, (usize, usize)>) {
+        self.sizes = sizes;
+    }
+
+    /// Replace the root of the pane tree (used during session restore).
+    pub fn replace_root(&mut self, root: Option<PaneNode>) {
+        self.root = root;
     }
 }
 
