@@ -199,6 +199,8 @@ impl Renderer {
         };
         surface.configure(&device, &surface_config);
 
+        // High-quality font system for proper ligatures, kerning, and international
+        // text support. Ghostty-level text rendering.
         let mut font_system = FontSystem::new();
         let swash_cache = SwashCache::new();
         let cache = Cache::new(&device);
@@ -209,8 +211,10 @@ impl Renderer {
 
         let font_family = resolve_family(&mut font_system, &cfg.font_family);
         let font_size = cfg.font_size;
-        let mut tab_buffer = Buffer::new(&mut font_system, Metrics::new(font_size, font_size * 1.3));
-        let mut toast_buffer = Buffer::new(&mut font_system, Metrics::new(font_size, font_size * 1.3));
+        // Use a slightly taller line height (1.35) for better readability and cursor positioning
+        let line_height = font_size * LINE_HEIGHT;
+        let mut tab_buffer = Buffer::new(&mut font_system, Metrics::new(font_size, line_height));
+        let mut toast_buffer = Buffer::new(&mut font_system, Metrics::new(font_size, line_height));
         tab_buffer.set_size(Some(2000.0), Some(40.0));
 
         // Solid-rect pipeline for selection backgrounds.
