@@ -188,18 +188,31 @@ impl Renderer {
             .create_surface(window.clone())
             .expect("create surface");
         let swapchain_format = TextureFormat::Bgra8UnormSrgb;
+
+        // Query supported alpha modes and pick the best available.
+        // PreMultiplied enables compositor blending (transparency), Opaque is fallback.
+        let caps = surface.get_capabilities(&adapter);
+        let alpha_mode = caps
+            .alpha_modes
+            .iter()
+            .copied()
+            .find(|m| *m == CompositeAlphaMode::PreMultiplied)
+            .or_else(|| caps.alpha_modes.first().copied())
+            .unwrap_or(CompositeAlphaMode::Opaque);
+
         let surface_config = SurfaceConfiguration {
             usage: TextureUsages::RENDER_ATTACHMENT,
             format: swapchain_format,
             width: physical_size.width.max(1),
             height: physical_size.height.max(1),
             present_mode: PresentMode::Fifo,
-            alpha_mode: CompositeAlphaMode::Opaque,
+            alpha_mode,
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
             color_space: wgpu::SurfaceColorSpace::Auto,
         };
         surface.configure(&device, &surface_config);
+        log::info!("Using alpha mode: {:?}", alpha_mode);
 
         // High-quality font system for proper ligatures, kerning, and international
         // text support. Ghostty-level text rendering.
