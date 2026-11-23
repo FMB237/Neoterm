@@ -85,7 +85,7 @@ struct Args {
     working_directory: Option<PathBuf>,
 
     #[command(subcommand)]
-    cmd: Option<SessionCmd>,
+    cmd: Option<CliCmd>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -107,6 +107,29 @@ enum SessionCmd {
         /// Session name to delete
         name: String,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum ThemeCmd {
+    /// List available built-in theme presets
+    List,
+    /// Set the theme preset
+    Set {
+        /// Preset name (tokyo-night, catppuccin-mocha, dracula, gruvbox-dark, or custom)
+        preset: String,
+    },
+    /// Show current theme configuration
+    Show,
+}
+
+#[derive(Subcommand, Debug)]
+enum CliCmd {
+    /// Session management
+    #[command(subcommand)]
+    Session(SessionCmd),
+    /// Theme management
+    #[command(subcommand)]
+    Theme(ThemeCmd),
 }
 
 /// Per-window state for multiple window support.
@@ -2264,9 +2287,12 @@ fn main() -> Result<()> {
     env_logger::init();
     let args = Args::parse();
 
-    // Handle session management commands (exit after execution)
+    // Handle CLI commands (exit after execution)
     if let Some(cmd) = &args.cmd {
-        return handle_session_cmd(cmd);
+        return match cmd {
+            CliCmd::Session(s) => handle_session_cmd(s),
+            CliCmd::Theme(t) => handle_theme_cmd(t),
+        };
     }
 
     let mut cfg = NeotermConfig::load();
@@ -2355,6 +2381,66 @@ fn handle_session_cmd(cmd: &SessionCmd) -> Result<()> {
         SessionCmd::Delete { name } => {
             delete_session(name)?;
             println!("Session '{}' deleted.", name);
+        }
+    }
+    Ok(())
+}
+
+/// Handle theme CLI commands.
+fn handle_theme_cmd(cmd: &ThemeCmd) -> Result<()> {
+    use crate::config::Theme;
+
+    match cmd {
+        ThemeCmd::List => {
+            println!("Built-in theme presets:");
+            println!("  tokyo-night      (default)");
+            println!("  catppuccin-mocha");
+            println!("  dracula");
+            println!("  gruvbox-dark");
+            println!("\nOr use 'custom' to use the custom colors from your config file.");
+        }
+        ThemeCmd::Set { preset } => {
+            let mut cfg = NeotermConfig::load();
+            if preset == "custom" {
+                cfg.theme.preset = None;
+                println!("Theme set to custom (using config file colors).");
+            } else if Theme::preset(preset).is_some() {
+                cfg.theme.preset = Some(preset.clone());
+                println!("Theme preset set to '{}'.", preset);
+            } else {
+                anyhow::bail!("Unknown theme preset '{}'. Run 'neoterm theme list' for available presets.", preset);
+            }
+            cfg.save()?;
+            println!("Config saved. Restart neoterm to apply.");
+        }
+        ThemeCmd::Show => {
+            let cfg = NeotermConfig::load();
+            if let Some(p) = &cfg.theme.preset {
+                println!("Theme preset: {}", p);
+            } else {
+                println!("Theme preset: custom");
+            }
+            println!("  background:      {}", cfg.theme.background);
+            println!("  foreground:      {}", cfg.theme.foreground);
+            println!("  cursor:          {}", cfg.theme.cursor);
+            println!("  selection:       {}", cfg.theme.selection);
+            println!("  tab_active_bg:   {}", cfg.theme.tab_active_bg);
+            println!("  tab_active_fg:   {}", cfg.theme.tab_active_fg);
+            println!("  tab_accent:      {}", cfg.theme.tab_accent);
+            println!("  tab_bar_border:  {}", cfg.theme.tab_bar_border);
+            println!("  tab_bar_bg:      {}", cfg.theme.tab_bar_bg.as_deref().unwrap_or("auto (follows body)"));
+            println!("  tab_inactive_fg: {}", cfg.theme.tab_inactive_fg);
+            println!("  tab_close_fg:    {}", cfg.theme.tab_close_fg);
+            println!("  tab_index_fg:    {}", cfg.theme.tab_index_fg);
+            println!("  scrollbar_track: {}", cfg.theme.scrollbar_track);
+            println!("  scrollbar_thumb: {}", cfg.theme.scrollbar_thumb);
+            println!("  palette:");
+            for (i, c) in cfg.theme.palette.iter().enumerate() {
+                print!("    [{}] {}", i, c);
+                if i % 4 == 3 {
+                    println!();
+                }
+            }
         }
     }
     Ok(())
