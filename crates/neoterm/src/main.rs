@@ -2,6 +2,7 @@ mod config;
 mod graphics;
 mod input;
 mod mouse;
+mod palette;
 mod renderer;
 mod search;
 mod session;
@@ -39,6 +40,7 @@ use renderer::{PaneDraw, Renderer, ScrollState};
 use tab::Tab;
 use search::{SearchMatch, SearchState};
 use session::{build_session_state, restore_session_state, session_file_path, SessionState};
+use palette::{PaletteAction, PaletteState};
 use tab::{CellRect, PaneId, SplitDir};
 use tabs::Tabs;
 
@@ -151,6 +153,7 @@ struct WindowState {
     search: Option<SearchState>,
     copymode: Option<CopymodeState>,
     broadcast: bool,
+    palette: Option<PaletteState>,
     // Mouse state
     cursor_pos: Option<PhysicalPosition<f64>>,
     selecting: bool,
@@ -1175,6 +1178,7 @@ impl App {
             scroll,
             strip,
             search_bar,
+            ws.palette.as_ref(),
         );
         ws.last_titles = titles;
         ws.last_active = active;
@@ -1425,6 +1429,188 @@ impl App {
     /// Return a copymode selection highlight color (linearized blue).
     fn copymode_highlight_rgb() -> (u8, u8, u8) {
         (100, 150, 255)
+    }
+    
+    // ---- Command Palette ----
+    
+    /// Toggle the command palette overlay.
+    fn toggle_palette(&mut self, ws: &mut WindowState) {
+        if ws.palette.is_none() {
+            ws.palette = Some(PaletteState::new());
+        }
+        if let Some(palette) = ws.palette.as_mut() {
+            palette.toggle();
+            log::info!("palette: {}", if palette.visible { "on" } else { "off" });
+        }
+        ws.force_draw = true;
+        ws.window.request_redraw();
+    }
+    
+    /// Handle keyboard input when palette is active.
+    fn handle_palette_key(&mut self, event_loop: &ActiveEventLoop, ws: &mut WindowState, event: &KeyEvent) {
+        let Some(palette) = ws.palette.as_mut() else { return };
+        match &event.logical_key {
+            Key::Named(NamedKey::Escape) => {
+                palette.close();
+            }
+            Key::Named(NamedKey::ArrowDown) => {
+                palette.select_next();
+            }
+            Key::Named(NamedKey::ArrowUp) => {
+                palette.select_prev();
+            }
+            Key::Named(NamedKey::Enter) => {
+                if let Some(action) = palette.execute_selected() {
+                    palette.close();
+                    self.execute_palette_action(event_loop, ws, action);
+                    return;
+                }
+            }
+            Key::Named(NamedKey::Backspace) => {
+                palette.backspace();
+            }
+            _ => {
+                if let Some(text) = &event.text {
+                    for c in text.chars() {
+                        if !c.is_control() {
+                            palette.type_char(c);
+                        }
+                    }
+                }
+            }
+        }
+        ws.force_draw = true;
+        ws.window.request_redraw();
+    }
+    
+    /// Execute a palette action (converts to InputAction or handles specially).
+    fn execute_palette_action(&mut self, event_loop: &ActiveEventLoop, ws: &mut WindowState, action: PaletteAction) {
+        match action {
+            // Theme actions are handled specially
+            PaletteAction::ThemeTokyoNight => self.set_theme(ws, "tokyo-night"),
+            PaletteAction::ThemeCatppuccinMocha => self.set_theme(ws, "catppuccin-mocha"),
+            PaletteAction::ThemeDracula => self.set_theme(ws, "dracula"),
+            PaletteAction::ThemeGruvboxDark => self.set_theme(ws, "gruvbox-dark"),
+            PaletteAction::ThemeCustom => self.set_theme(ws, "custom"),
+            // Session actions
+            PaletteAction::SessionSave => self.handle_session_save(ws),
+            PaletteAction::SessionLoad => self.handle_session_load(ws),
+            PaletteAction::SessionList => self.handle_session_list(ws),
+            // Performance HUD
+            PaletteAction::TogglePerformanceHud => {
+                log::info!("Performance HUD toggle not yet implemented");
+            }
+            // All other actions map to InputAction
+            _ => {
+                if let Some(input_action) = action.to_input_action() {
+                    // Reuse the keyboard handling logic by calling handle_keyboard recursively
+                    // We can't easily do that, so we'll handle the common ones directly
+                    self.handle_input_action_direct(event_loop, ws, input_action);
+                }
+            }
+        }
+    }
+    
+    /// Handle InputAction directly without going through map_key.
+    fn handle_input_action_direct(&mut self, event_loop: &ActiveEventLoop, ws: &mut WindowState, action: crate::input::InputAction) {
+        use crate::input::InputAction;
+        match action {
+            InputAction::NewTab => {
+                if let Err(e) = ws.tabs.new_tab(&self.cfg) {
+                    log::error!("new tab failed: {e:#}");
+                }
+            }
+            InputAction::NewWindow => {
+                if let Some(new_window) = self.create_window_with_config(event_loop) {
+                    log::info!("created new window: {:?}", new_window.id());
+                }
+            }
+            InputAction::ClosePane => {
+                ws.tabs.close_active_pane(&self.cfg);
+            }
+            InputAction::SplitV => {
+                match ws.tabs.split_active_tab(crate::tab::SplitDir::V, &self.cfg) {
+                    Ok(false) => log::info!("split refused: pane too small"),
+                    Err(e) => log::error!("split failed: {e:#}"),
+                    _ => {}
+                }
+            }
+            InputAction::SplitH => {
+                match ws.tabs.split_active_tab(crate::tab::SplitDir::H, &self.cfg) {
+                    Ok(false) => log::info!("split refused: pane too small"),
+                    Err(e) => log::error!("split failed: {e:#}"),
+                    _ => {}
+                }
+            }
+            InputAction::NextTab => ws.tabs.next(),
+            InputAction::PrevTab => ws.tabs.prev(),
+            InputAction::FocusPane(dir) => {
+                ws.tabs.focus_active_tab(dir);
+            }
+            InputAction::ZoomPane => ws.tabs.zoom_active_tab(),
+            InputAction::FontZoomIn => self.zoom_font(ws, 1.0),
+            InputAction::FontZoomOut => self.zoom_font(ws, -1.0),
+            InputAction::FontZoomReset => self.reset_font(ws),
+            InputAction::RenameTab => self.start_rename(ws),
+            InputAction::UnpinTab => ws.tabs.unpin_active(),
+            InputAction::BroadcastToggle => {
+                ws.broadcast = !ws.broadcast;
+                log::info!("broadcast input: {}", if ws.broadcast { "on" } else { "off" });
+            }
+            InputAction::CopymodeToggle => self.toggle_copymode(ws),
+            InputAction::SearchToggle => self.toggle_search(ws),
+            InputAction::Copy => self.do_copy(ws),
+            InputAction::Paste => self.do_paste(ws),
+            InputAction::SelectTab(i) => ws.tabs.select(i),
+            _ => {}
+        }
+        ws.force_draw = true;
+        ws.window.request_redraw();
+    }
+    
+    /// Set theme from palette.
+    fn set_theme(&mut self, ws: &mut WindowState, preset: &str) {
+        use crate::config::Theme;
+        let mut cfg = NeotermConfig::load();
+        if preset == "custom" {
+            cfg.theme.preset = None;
+        } else if Theme::preset(preset).is_some() {
+            cfg.theme.preset = Some(preset.to_string());
+        } else {
+            log::warn!("Unknown theme preset: {}", preset);
+            return;
+        }
+        if let Err(e) = cfg.save() {
+            log::error!("Failed to save config: {}", e);
+            return;
+        }
+        self.cfg = cfg;
+        // Update renderer with new theme
+        ws.renderer.update_theme(&self.cfg);
+        log::info!("Theme set to {}", preset);
+    }
+    
+    /// Handle session save from palette.
+    fn handle_session_save(&mut self, ws: &mut WindowState) {
+        use crate::session::{build_session_state, named_session_path};
+        let state = build_session_state(self);
+        let name = format!("session-{}", chrono::Local::now().format("%Y%m%d-%H%M%S"));
+        let path = named_session_path(&name);
+        match state.save(&path) {
+            Ok(_) => log::info!("Session saved as {}", name),
+            Err(e) => log::error!("Failed to save session: {}", e),
+        }
+    }
+    
+    /// Handle session load from palette.
+    fn handle_session_load(&mut self, ws: &mut WindowState) {
+        // For now just log - would need a session picker UI
+        log::info!("Session load from palette not yet implemented");
+    }
+    
+    /// Handle session list from palette.
+    fn handle_session_list(&mut self, ws: &mut WindowState) {
+        log::info!("Session list from palette not yet implemented");
     }
     
     // ---- Copymode (Vi-style selection) ----
@@ -1832,6 +2018,7 @@ impl App {
             search: None,
             copymode: None,
             broadcast: false,
+            palette: None,
             cursor_pos: None,
             selecting: false,
             left_held: false,
@@ -1898,6 +2085,7 @@ impl App {
             search: None,
             copymode: None,
             broadcast: false,
+            palette: None,
             cursor_pos: None,
             selecting: false,
             left_held: false,
@@ -1925,6 +2113,13 @@ impl App {
         // title instead of reaching the shell.
         if ws.rename.is_some() {
             self.on_rename_key(ws, event);
+            return;
+        }
+        // A live palette owns the keyboard: keys navigate/filter/select.
+        // Check visibility first without mutable borrow.
+        let palette_visible = ws.palette.as_ref().map(|p| p.visible).unwrap_or(false);
+        if palette_visible && event.state == ElementState::Pressed {
+            self.handle_palette_key(event_loop, ws, event);
             return;
         }
         // A live copymode owns the keyboard: keys navigate/select/copy.
@@ -2089,6 +2284,7 @@ impl App {
             InputAction::CopymodeSelectLine => self.copymode_select_line(ws),
             InputAction::CopymodeCopy => self.copymode_copy(ws),
             InputAction::CopymodeExit => self.copymode_exit(ws),
+            InputAction::PaletteToggle => self.toggle_palette(ws),
             InputAction::Ignored => {}
         }
     }

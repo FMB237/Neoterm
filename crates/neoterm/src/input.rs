@@ -48,6 +48,8 @@ pub enum InputAction {
     NewWindow,
     /// Toggle Vi-style copy mode (Ctrl+Shift+Space).
     CopymodeToggle,
+    /// Toggle command palette (Ctrl+Shift+P).
+    PaletteToggle,
     /// Copymode navigation (only active in copymode).
     CopymodeUp,
     CopymodeDown,
@@ -234,6 +236,7 @@ pub fn chrome_action(key: &Key, mods: ModifiersState) -> Option<InputAction> {
                 "U" => return Some(InputAction::UnpinTab),
                 "B" => return Some(InputAction::BroadcastToggle),
                 " " => return Some(InputAction::CopymodeToggle),
+                "K" => return Some(InputAction::PaletteToggle),
                 _ => {}
             },
             Key::Named(NamedKey::Tab) => return Some(InputAction::NextTab),

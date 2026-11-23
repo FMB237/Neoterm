@@ -276,6 +276,11 @@ impl Theme {
         Self::quad_f32(&self.tab_bar_border)
     }
 
+    /// Surface of the copy/paste toast.
+    pub fn toast_bg_quad(&self) -> [f32; 3] {
+        Self::quad_f32(&self.tab_active_bg)
+    }
+
     /// The dim index badge color.
     pub fn tab_index_fg_glyphon(&self) -> glyphon::Color {
         Self::glyphon_color(&self.tab_index_fg)

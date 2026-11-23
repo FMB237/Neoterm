@@ -114,6 +114,8 @@ pub struct Renderer {
     toast_buffer: Buffer,
     /// Search bar buffer (query + match count), drawn in the tab strip.
     search_buffer: Buffer,
+    /// Command palette buffer (query + filtered commands), drawn as centered overlay.
+    palette_buffer: Buffer,
     /// Text buffers + shaped-row caches per pane id (rebuilt on row-count
     /// change; pruned when panes close).
     pane_buffers: HashMap<PaneId, Vec<Buffer>>,
@@ -233,7 +235,9 @@ impl Renderer {
         let mut tab_buffer = Buffer::new(&mut font_system, Metrics::new(font_size, line_height));
         let mut toast_buffer = Buffer::new(&mut font_system, Metrics::new(font_size, line_height));
         let mut search_buffer = Buffer::new(&mut font_system, Metrics::new(font_size, line_height));
+        let mut palette_buffer = Buffer::new(&mut font_system, Metrics::new(font_size, line_height));
         tab_buffer.set_size(Some(2000.0), Some(40.0));
+        palette_buffer.set_size(Some(800.0), Some(600.0));
 
         // Solid-rect pipeline for selection backgrounds.
         let sel_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -295,6 +299,7 @@ impl Renderer {
             tab_buffer,
             toast_buffer,
             search_buffer,
+            palette_buffer,
             pane_buffers: HashMap::new(),
             pane_rows: HashMap::new(),
             window,
@@ -415,6 +420,33 @@ impl Renderer {
     pub fn font_size(&self) -> f32 {
         self.font_size
     }
+    
+    /// Update theme colors from config.
+    pub fn update_theme(&mut self, cfg: &crate::config::NeotermConfig) {
+        self.bg = cfg.bg_wgpu();
+        self.flash_bg = crate::renderer::flash_color(cfg);
+        self.fg = cfg.fg_glyphon();
+        self.font_size = cfg.font_size;
+        self.font_family = crate::renderer::resolve_family(&mut self.font_system, &cfg.font_family);
+        self.cursor_rgb = crate::renderer::cursor_color(cfg);
+        self.bg_quad = crate::renderer::bg_color(cfg);
+        self.sel_bg = cfg.theme.selection_quad();
+        self.track_bg = cfg.theme.scrollbar_track_quad();
+        self.thumb_bg = cfg.theme.scrollbar_thumb_quad();
+        self.strip_bg = cfg.theme.tab_bar_bg_quad();
+        self.tab_accent = cfg.theme.tab_accent_quad();
+        self.tab_active_bg = cfg.theme.tab_active_bg_quad();
+        self.tab_active_fg = cfg.theme.tab_active_fg_glyphon();
+        self.tab_inactive_fg = cfg.theme.tab_inactive_fg_glyphon();
+        self.tab_close_fg = cfg.theme.tab_close_fg_glyphon();
+        self.tab_index_fg = cfg.theme.tab_index_fg_glyphon();
+        self.bg_glyph = cfg.theme.bg_glyphon();
+        self.tab_bar_border = cfg.theme.tab_bar_border_quad();
+        self.toast_bg = cfg.theme.toast_bg_quad();
+        // Force re-shape of tab bar with new colors
+        self.last_tab_text.clear();
+        self.window.request_redraw();
+    }
 
     /// Shape a throwaway run to get the real advance for the current face.
     /// Falls back to `None` (0.62em heuristic) only if shaping yields one
@@ -531,6 +563,7 @@ impl Renderer {
         scroll: ScrollState,
         strip: bool,
         search: Option<(&str, usize)>, // (query, match_count)
+        palette: Option<&crate::palette::PaletteState>,
     ) {
         let scale = self.window.scale_factor() as f32;
         let w = self.surface_config.width;
@@ -686,6 +719,65 @@ impl Renderer {
             
             self.search_buffer.set_rich_text(spans, &base, Shaping::Advanced, None);
             self.search_buffer.shape_until_scroll(&mut self.font_system, false);
+        }
+        
+        // Palette: shape query + filtered commands when palette is active
+        if let Some(palette) = palette {
+            if palette.visible {
+                let family = match self.font_family.as_deref() {
+                    Some(name) => Family::Name(name),
+                    None => Family::Monospace,
+                };
+                let base = Attrs::new().family(family).color(self.tab_active_fg);
+                let bold_attrs = Attrs::new()
+                    .family(family)
+                    .color(Color::rgb(255, 255, 255))
+                    .weight(Weight::BOLD);
+                let accent_attrs = Attrs::new()
+                    .family(family)
+                    .color(self.tab_active_fg)
+                    .weight(Weight::BOLD);
+                let dim_attrs = Attrs::new()
+                    .family(family)
+                    .color(Color::rgb(150, 150, 150));
+                
+                // Build palette text: query on first line, then filtered commands
+                let query_text = format!("> {}", palette.query);
+                let mut lines = vec![query_text];
+                for cmd in palette.visible_commands() {
+                    let marker = if palette.filtered[palette.selected] == palette.commands.iter().position(|c| c.id == cmd.id).unwrap() {
+                        "▸ "
+                    } else {
+                        "  "
+                    };
+                    lines.push(format!("{}{}", marker, cmd.label));
+                    lines.push(format!("{}  {}", " ".repeat(marker.len()), cmd.description));
+                }
+                let palette_text = lines.join("\n");
+                
+                // We'll use a simpler approach: just render the whole thing with basic styling
+                let mut spans = Vec::new();
+                let mut char_pos = 0;
+                for (line_idx, line) in lines.iter().enumerate() {
+                    let line_len = line.chars().count();
+                    if line_idx == 0 {
+                        // Query line: bold
+                        spans.push((line.as_str(), bold_attrs.clone()));
+                    } else if line_idx % 2 == 1 {
+                        // Command label line
+                        let is_selected = (line_idx - 1) / 2 == palette.selected.min(palette.filtered.len().saturating_sub(1));
+                        let attrs = if is_selected { accent_attrs.clone() } else { base.clone() };
+                        spans.push((line.as_str(), attrs));
+                    } else {
+                        // Description line: dim
+                        spans.push((line.as_str(), dim_attrs.clone()));
+                    }
+                    char_pos += line_len + 1; // +1 for newline
+                }
+                
+                self.palette_buffer.set_rich_text(spans, &base, Shaping::Advanced, None);
+                self.palette_buffer.shape_until_scroll(&mut self.font_system, false);
+            }
         }
         
         // Per-pane row buffers: reshape only rows whose content changed
@@ -1205,6 +1297,35 @@ impl Renderer {
                 });
             }
         }
+        
+        // Command palette overlay: centered in window
+        if let Some(palette) = palette {
+            if palette.visible {
+                // Draw a semi-transparent background for the palette
+                let cell = self.advance() * scale;
+                let palette_w = 60.0 * cell;
+                let palette_h = 30.0 * cell; // approximate height
+                let pad = 16.0 * scale;
+                let x0 = (w as f32 - palette_w) / 2.0;
+                let y0 = (h as f32 - palette_h) / 2.0;
+                
+                areas.push(TextArea {
+                    buffer: &self.palette_buffer,
+                    left: x0 + pad,
+                    top: y0 + pad,
+                    scale,
+                    bounds: TextBounds {
+                        left: x0 as i32,
+                        top: y0 as i32,
+                        right: (x0 + palette_w) as i32,
+                        bottom: (y0 + palette_h) as i32,
+                    },
+                    default_color: self.tab_active_fg,
+                    custom_glyphs: &[],
+                });
+            }
+        }
+        
         for pane in panes {
             let bufs = self.pane_buffers.get(&pane.id);
             let Some(bufs) = bufs else {
