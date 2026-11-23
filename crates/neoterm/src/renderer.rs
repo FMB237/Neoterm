@@ -1275,12 +1275,10 @@ impl Renderer {
             });
             
             // Search bar: render as small floating pill in top-right corner (Ghostty-style)
-            if search.is_some() {
+            if let Some((query, match_count)) = search {
                 let cell = self.advance() * scale;
                 // Small pill: " 🔍 query (N)" with padding
-                let search_text = format!(" 🔍 {}  ({})", 
-                    search.unwrap().0, 
-                    search.unwrap().1);
+                let search_text = format!(" 🔍 {}  ({})", query, match_count);
                 let search_w = (search_text.chars().count() as f32 + 2.0) * cell;
                 let pad = 12.0 * scale;
                 let x0 = (w as f32 - search_w - pad);
