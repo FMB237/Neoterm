@@ -18,12 +18,14 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
+
+use crate::shell_integration::{preprocess_shell_integration, new_shared_shell_integration, SharedShellIntegration};
+use crate::graphics::{preprocess_graphics, new_shared_graphics_state, SharedGraphicsState, GraphicsProtocol, GraphicsState};
 use winit::event_loop::EventLoopProxy;
 
 use std::collections::HashMap;
 
 use crate::config::NeotermConfig;
-use crate::graphics::{GraphicsProtocol, GraphicsState, SharedGraphicsState, new_shared_graphics_state};
 use crate::input::FocusDir;
 
 /// Dimensions adapter for alacritty_terminal.
@@ -158,6 +160,8 @@ pub struct Pane {
     cwd: PathBuf,
     /// Graphics state for Sixel/Kitty protocol support.
     graphics: SharedGraphicsState,
+    /// Shell integration state for OSC 7/133/633.
+    shell_integration: SharedShellIntegration,
 }
 
 impl Pane {
@@ -218,6 +222,9 @@ impl Pane {
         // Create graphics state before spawning reader thread so we can capture it
         let graphics = new_shared_graphics_state();
         let graphics_clone = Arc::clone(&graphics);
+        // Create shell integration state
+        let shell_integration = new_shared_shell_integration();
+        let shell_integration_clone = Arc::clone(&shell_integration);
         thread::spawn(move || {
             let mut processor: vte::ansi::Processor = Default::default();
             let mut buf = [0u8; 8192];
@@ -236,6 +243,8 @@ impl Pane {
                     Ok(n) => {
                         // Preprocess graphics escape sequences (Sixel/Kitty)
                         let processed = crate::graphics::preprocess_graphics(&buf[..n], &graphics_clone);
+                        // Preprocess shell integration escape sequences (OSC 7/133/633)
+                        let processed = crate::shell_integration::preprocess_shell_integration(&processed, &shell_integration_clone);
                         if let Ok(mut t) = term_clone.lock() {
                             processor.advance(&mut *t, &processed);
                         }
@@ -267,6 +276,7 @@ impl Pane {
             last_cursor: Mutex::new((0, 0)),
             cwd: cwd.to_path_buf(),
             graphics,
+            shell_integration,
         })
     }
 
@@ -291,6 +301,11 @@ impl Pane {
     /// Get the graphics state for Sixel/Kitty protocol support.
     pub fn graphics(&self) -> &SharedGraphicsState {
         &self.graphics
+    }
+
+    /// Get the shell integration state for OSC 7/133/633.
+    pub fn shell_integration(&self) -> &SharedShellIntegration {
+        &self.shell_integration
     }
 
     pub fn write(&self, bytes: &[u8]) {

@@ -6,6 +6,7 @@ mod palette;
 mod renderer;
 mod search;
 mod session;
+mod shell_integration;
 mod tab;
 mod tabs;
 
