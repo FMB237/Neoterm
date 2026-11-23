@@ -682,6 +682,7 @@ impl Renderer {
         
         // Search bar: shape query + match count when search is active
         if let Some((query, match_count)) = search {
+            // Ghostty-style: small floating pill in top-right corner
             let search_text = format!(" 🔍 {}  ({})", query, match_count);
             let base = Attrs::new().family(family).color(self.tab_active_fg);
             let bold_attrs = Attrs::new()
@@ -1273,24 +1274,28 @@ impl Renderer {
                 custom_glyphs: &[],
             });
             
-            // Search bar: render on the right side of the tab strip
+            // Search bar: render as small floating pill in top-right corner (Ghostty-style)
             if search.is_some() {
-                // Calculate search bar position (right-aligned in tab strip)
                 let cell = self.advance() * scale;
-                // Approximate width: " 🔍 " (4 chars) + query + "  (N)" (up to 8 chars)
-                let search_w = 20.0 * cell; // generous estimate
-                let pad = 8.0 * scale;
-                let x0 = (w as f32 - search_w - pad - PAD_X * scale).max(tab_left + 100.0 * scale);
+                // Small pill: " 🔍 query (N)" with padding
+                let search_text = format!(" 🔍 {}  ({})", 
+                    search.unwrap().0, 
+                    search.unwrap().1);
+                let search_w = (search_text.chars().count() as f32 + 2.0) * cell;
+                let pad = 12.0 * scale;
+                let x0 = (w as f32 - search_w - pad);
+                let y0 = 8.0 * scale; // Top margin
+                
                 areas.push(TextArea {
                     buffer: &self.search_buffer,
                     left: x0,
-                    top: tab_top,
+                    top: y0,
                     scale,
                     bounds: TextBounds {
-                        left: 0,
-                        top: 0,
-                        right: w as i32,
-                        bottom: (body_top as i32).max(10),
+                        left: x0 as i32,
+                        top: y0 as i32,
+                        right: (x0 + search_w + pad) as i32,
+                        bottom: (y0 + self.font_size * 1.5 * scale) as i32,
                     },
                     default_color: self.tab_active_fg,
                     custom_glyphs: &[],
