@@ -2131,6 +2131,7 @@ impl App {
         // query instead of reaching the shell. Chrome actions
         // (Ctrl+Shift+F etc.) still pass through to map_key below.
         if ws.search.is_some() && event.state == ElementState::Pressed {
+            let shift = self.mods.state().shift_key();
             match &event.logical_key {
                 Key::Named(NamedKey::Backspace) => {
                     self.search_backspace(ws);
@@ -2140,6 +2141,15 @@ impl App {
                     self.search_cancel(ws);
                     return;
                 }
+                Key::Named(NamedKey::Enter) => {
+                    // Enter: next match, Shift+Enter: previous match
+                    if shift {
+                        self.search_prev(ws);
+                    } else {
+                        self.search_next(ws);
+                    }
+                    return;
+                }
                 _ => {}
             }
             // Any printable text gets appended to the query.
@@ -2147,10 +2157,12 @@ impl App {
                 for c in text.chars() {
                     if !c.is_control() {
                         self.search_type_char(ws, c);
+                        return;
                     }
                 }
-                return;
             }
+            // Non-printable keys (arrows, Ctrl+Shift+F, etc.) fall through
+            // to chrome_action / map_key below so they still work.
         }
 
         let alt = ws
