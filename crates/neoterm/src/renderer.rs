@@ -148,6 +148,8 @@ pub struct Renderer {
     bg_glyph: Color,
     /// Hairline under the tab strip.
     tab_bar_border: [f32; 3],
+    /// Active tab pill background (from theme `tab_active_bg`).
+    tab_active_bg: [f32; 3],
     /// Surface of the copy/paste toast.
     toast_bg: [f32; 3],
     // Perf gate: skip cosmic-text shaping when content is unchanged.
@@ -292,6 +294,7 @@ impl Renderer {
             thumb_bg: cfg.theme.scrollbar_thumb_quad(),
             strip_bg: cfg.theme.tab_bar_bg_quad(),
             tab_accent: cfg.theme.tab_accent_quad(),
+            tab_active_bg: cfg.theme.tab_active_bg_quad(),
             tab_active_fg: cfg.theme.tab_active_fg_glyphon(),
             tab_inactive_fg: cfg.theme.tab_inactive_fg_glyphon(),
             tab_close_fg: cfg.theme.tab_close_fg_glyphon(),
@@ -335,6 +338,7 @@ impl Renderer {
         self.thumb_bg = cfg.theme.scrollbar_thumb_quad();
         self.strip_bg = cfg.theme.tab_bar_bg_quad();
         self.tab_accent = cfg.theme.tab_accent_quad();
+        self.tab_active_bg = cfg.theme.tab_active_bg_quad();
         self.tab_active_fg = cfg.theme.tab_active_fg_glyphon();
         self.tab_inactive_fg = cfg.theme.tab_inactive_fg_glyphon();
         self.tab_close_fg = cfg.theme.tab_close_fg_glyphon();
@@ -538,11 +542,18 @@ impl Renderer {
         if tab_text != self.last_tab_text || hover != self.last_hover {
             let spans_info = mouse::tab_spans(titles);
             let active_range = mouse::active_title_range(titles, active);
+            // Inactive tabs: muted color, normal weight
             let base = Attrs::new().family(family).color(self.tab_inactive_fg);
+            // Active tab: bright white for contrast against pill background
             let active_attrs = Attrs::new()
                 .family(family)
-                .color(self.tab_active_fg)
+                .color(Color::rgb(255, 255, 255))
                 .weight(Weight::BOLD);
+            // Hovered inactive tab: slightly brighter than base
+            let hover_attrs = Attrs::new()
+                .family(family)
+                .color(self.tab_active_fg)
+                .weight(Weight::NORMAL);
             let close_attrs = Attrs::new().family(family).color(self.tab_close_fg);
             // The close mark is invisible until its tab is hovered: it is
             // drawn in the background color, but the cell is always there,
@@ -586,6 +597,12 @@ impl Renderer {
                         .indices
                         .iter()
                         .any(|xr| xr.start <= a && b <= xr.end);
+                    // Check if this piece belongs to the hovered inactive tab
+                    let is_hovered_inactive = hover.is_some()
+                        && hover != Some(active)
+                        && spans_info.indices.iter().enumerate().any(|(i, xr)| {
+                            Some(i) == hover && xr.start <= a && b <= xr.end
+                        });
                     let attrs = if is_plus {
                         close_attrs.clone()
                     } else if let Some(i) = close_idx {
@@ -598,6 +615,8 @@ impl Renderer {
                         index_attrs.clone()
                     } else if in_active {
                         active_attrs.clone()
+                    } else if is_hovered_inactive {
+                        hover_attrs.clone()
                     } else {
                         base.clone()
                     };
@@ -681,10 +700,10 @@ impl Renderer {
         // tab strip first (skipped when hidden), then per-cell backgrounds,
         // selection, scrollbar.
         let mut bg_verts: Vec<SelVertex> = Vec::new();
-        // Seamless Ghostty-style strip: full-width background in the body
-        // color (or the explicit override). No pill, no separator — the
-        // active tab reads through bold accent text and a short underline.
+        // Ghostty-style tab strip: subtle background, pill for active tab,
+        // subtle hover for inactive tabs.
         if strip {
+            // Full strip background (slightly different from body for depth)
             push_quad(
                 &mut bg_verts,
                 0.0,
@@ -695,8 +714,7 @@ impl Renderer {
                 h as f32,
                 with_alpha(self.strip_bg, 1.0),
             );
-            // One hairline makes the strip a legible region without
-            // adding a band.
+            // Hairline separator at bottom of strip
             let hair = scale.max(1.0);
             push_quad(
                 &mut bg_verts,
@@ -708,20 +726,60 @@ impl Renderer {
                 h as f32,
                 with_alpha(self.tab_bar_border, 1.0),
             );
-            // Accent underline under the active tab (theme `tab_accent`).
+
+            // Compute tab regions for pill/hover rendering
+            let regions = mouse::tab_regions(titles, self.advance(), tab_left, scale);
+
+            // Render inactive tab hover backgrounds first (behind active pill)
+            if let Some(hover_idx) = hover {
+                if hover_idx < titles.len() && hover_idx != active {
+                    if let Some(&(x0, x1)) = regions.get(hover_idx) {
+                        let pill_h = (body_top * 0.65).max(self.font_size * 1.1 * scale);
+                        let pill_y = (body_top - pill_h) / 2.0;
+                        let radius = (pill_h / 2.0).min(8.0 * scale);
+                        // Draw rounded pill using multiple quads (simulated)
+                        let pad = 4.0 * scale;
+                        push_quad(
+                            &mut bg_verts,
+                            x0 + pad,
+                            pill_y,
+                            x1 - pad,
+                            pill_y + pill_h,
+                            w as f32,
+                            h as f32,
+                            with_alpha(self.tab_active_bg, 0.15),
+                        );
+                    }
+                }
+            }
+
+            // Active tab pill (Ghostty-style filled rounded background)
             if !titles.is_empty() && active < titles.len() {
-                let regions = mouse::tab_regions(titles, self.advance(), tab_left, scale);
                 if let Some(&(x0, x1)) = regions.get(active) {
-                    let inset = 6.0 * scale;
+                    let pill_h = (body_top * 0.7).max(self.font_size * 1.2 * scale);
+                    let pill_y = (body_top - pill_h) / 2.0;
+                    let pad = 4.0 * scale;
+                    // Main pill body
                     push_quad(
                         &mut bg_verts,
-                        x0 + inset,
-                        body_top - 3.0 * scale,
-                        (x1 - inset).max(x0 + inset),
-                        body_top - 1.0 * scale,
+                        x0 + pad,
+                        pill_y,
+                        x1 - pad,
+                        pill_y + pill_h,
                         w as f32,
                         h as f32,
-                        with_alpha(self.tab_accent, 0.95),
+                        with_alpha(self.tab_active_bg, 1.0),
+                    );
+                    // Accent underline (thinner, at bottom of pill)
+                    push_quad(
+                        &mut bg_verts,
+                        x0 + pad + 2.0 * scale,
+                        pill_y + pill_h - 2.0 * scale,
+                        x1 - pad - 2.0 * scale,
+                        pill_y + pill_h,
+                        w as f32,
+                        h as f32,
+                        with_alpha(self.tab_accent, 1.0),
                     );
                 }
             }
