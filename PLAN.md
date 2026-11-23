@@ -413,3 +413,15 @@ required — Xvfb alone cannot create a wgpu surface on this machine):
   (pre-existing deviations exist), so do not reformat unrelated code.
 - Version bumps happen in `crates/neoterm/Cargo.toml` (and the `--version`
   output) — keep them in sync with the milestone list.
+
+---
+
+## 7. Fixed Bugs (Batch D)
+
+### Search Bar (D1) — `Ctrl+Shift+F`
+
+| Bug | Root Cause | Fix | Commit |
+|-----|------------|-----|--------|
+| **Terminal freezes when search opens** | Keyboard handler consumed ALL keys but only handled Backspace/Escape/printable. Enter, arrows, Ctrl+Shift+F again were silently swallowed. | Only consume search-relevant keys (Backspace, Escape, Enter, printable). Others fall through to normal chrome_action/map_key. Added Enter=next match, Shift+Enter=prev match. | `be31f5b` |
+| **Search bar not visible (panic)** | Double `unwrap()` on `Option<(&str, usize)>` — first unwrap consumed the Option, second panicked. | Properly destructure once with `if let Some((query, match_count)) = search`. | `83f9fb7` |
+| **Search bar invisible when tab strip hidden** | Search bar rendering was inside `if strip { ... }` block. Invisible when `tab_bar=never` or `auto` with 1 tab. | Move search bar rendering outside strip condition — always renders when search active. | `7219b84` |
