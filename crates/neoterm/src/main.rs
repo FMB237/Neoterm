@@ -1117,6 +1117,7 @@ impl App {
             .map(|until| Instant::now() < until)
             .unwrap_or(false);
         r.set_flash(flash);
+        let search_bar = ws.search.as_ref().map(|s| (s.query.as_str(), s.matches().len()));
         r.draw(
             &titles,
             t.active_index(),
@@ -1126,6 +1127,7 @@ impl App {
             &divs,
             scroll,
             strip,
+            search_bar,
         );
         ws.last_titles = titles;
         ws.last_active = active;

@@ -112,6 +112,8 @@ pub struct Renderer {
     tab_buffer: Buffer,
     /// Toast label (copy / paste confirmation), drawn over the body.
     toast_buffer: Buffer,
+    /// Search bar buffer (query + match count), drawn in the tab strip.
+    search_buffer: Buffer,
     /// Text buffers + shaped-row caches per pane id (rebuilt on row-count
     /// change; pruned when panes close).
     pane_buffers: HashMap<PaneId, Vec<Buffer>>,
@@ -230,6 +232,7 @@ impl Renderer {
         let line_height = font_size * LINE_HEIGHT;
         let mut tab_buffer = Buffer::new(&mut font_system, Metrics::new(font_size, line_height));
         let mut toast_buffer = Buffer::new(&mut font_system, Metrics::new(font_size, line_height));
+        let mut search_buffer = Buffer::new(&mut font_system, Metrics::new(font_size, line_height));
         tab_buffer.set_size(Some(2000.0), Some(40.0));
 
         // Solid-rect pipeline for selection backgrounds.
@@ -291,6 +294,7 @@ impl Renderer {
             text_renderer,
             tab_buffer,
             toast_buffer,
+            search_buffer,
             pane_buffers: HashMap::new(),
             pane_rows: HashMap::new(),
             window,
@@ -526,6 +530,7 @@ impl Renderer {
         dividers: &[CellRect],
         scroll: ScrollState,
         strip: bool,
+        search: Option<(&str, usize)>, // (query, match_count)
     ) {
         let scale = self.window.scale_factor() as f32;
         let w = self.surface_config.width;
@@ -641,7 +646,48 @@ impl Renderer {
             self.last_tab_text = tab_text.clone();
             self.last_hover = hover;
         }
-
+        
+        // Search bar: shape query + match count when search is active
+        if let Some((query, match_count)) = search {
+            let search_text = format!(" 🔍 {}  ({})", query, match_count);
+            let base = Attrs::new().family(family).color(self.tab_active_fg);
+            let bold_attrs = Attrs::new()
+                .family(family)
+                .color(Color::rgb(255, 255, 255))
+                .weight(Weight::BOLD);
+            
+            // Split into " 🔍 " (icon), query, and "  (N)" (count)
+            let icon_len = 2; // " 🔍"
+            let query_len = query.chars().count();
+            let count_text = format!("  ({})", match_count);
+            let count_len = count_text.chars().count();
+            
+            let mut cuts = vec![0, icon_len, icon_len + query_len, search_text.len()];
+            cuts.sort_unstable();
+            cuts.dedup();
+            
+            let spans: Vec<(&str, Attrs)> = cuts
+                .windows(2)
+                .filter_map(|w| {
+                    let (a, b) = (w[0], w[1]);
+                    if a >= b {
+                        return None;
+                    }
+                    let piece = search_text.get(a..b)?;
+                    let is_query = a >= icon_len && b <= icon_len + query_len;
+                    let attrs = if is_query {
+                        bold_attrs.clone()
+                    } else {
+                        base.clone()
+                    };
+                    Some((piece, attrs))
+                })
+                .collect();
+            
+            self.search_buffer.set_rich_text(spans, &base, Shaping::Advanced, None);
+            self.search_buffer.shape_until_scroll(&mut self.font_system, false);
+        }
+        
         // Per-pane row buffers: reshape only rows whose content changed
         // (text, spans, selection range, or background). Caches are keyed
         // by pane id and pruned when panes close.
@@ -1134,6 +1180,30 @@ impl Renderer {
                 default_color: self.tab_inactive_fg,
                 custom_glyphs: &[],
             });
+            
+            // Search bar: render on the right side of the tab strip
+            if search.is_some() {
+                // Calculate search bar position (right-aligned in tab strip)
+                let cell = self.advance() * scale;
+                // Approximate width: " 🔍 " (4 chars) + query + "  (N)" (up to 8 chars)
+                let search_w = 20.0 * cell; // generous estimate
+                let pad = 8.0 * scale;
+                let x0 = (w as f32 - search_w - pad - PAD_X * scale).max(tab_left + 100.0 * scale);
+                areas.push(TextArea {
+                    buffer: &self.search_buffer,
+                    left: x0,
+                    top: tab_top,
+                    scale,
+                    bounds: TextBounds {
+                        left: 0,
+                        top: 0,
+                        right: w as i32,
+                        bottom: (body_top as i32).max(10),
+                    },
+                    default_color: self.tab_active_fg,
+                    custom_glyphs: &[],
+                });
+            }
         }
         for pane in panes {
             let bufs = self.pane_buffers.get(&pane.id);
