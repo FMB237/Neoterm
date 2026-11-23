@@ -316,7 +316,7 @@ isolation.
 | **D1. Persistent search bar** | Draw the typed query + match count in the tab strip (reusing the rename overlay pattern). `Enter`/`Shift+Enter` still jump, `Esc` closes. | `main.rs`, `renderer.rs`, `search.rs` (~120 lines) |
 | **D2. Command palette** | `Ctrl+Shift+P` opens a fuzzy-searchable overlay: new tab/split/window, theme picker, font zoom, copy mode, session save/load, config shortcuts. Pure keyboard, no mouse required. | `main.rs`, `renderer.rs`, new `palette.rs` (~250 lines) |
 | **D3. Session manager CLI** | `neoterm session save <name>`, `load <name>`, `list`, `delete`, `autosave on/off`. Sessions are JSON (already implemented in C2); CLI just wires them. | `main.rs`, `session.rs`, `clap` (~150 lines) |
-| **D4. Shell integration** | OSC 7 (cwd), OSC 133 (prompt mark), OSC 633 (command status). Fish/Zsh/Bash snippets in `assets/`. Enables: per-pane cwd tracking, jump-to-previous-prompt, failed-command highlight. | `tab.rs`, `main.rs`, `assets/` (~200 lines + snippets) |
+| ~~**D4. Shell integration**~~ | ~~OSC 7 (cwd), OSC 133 (prompt mark), OSC 633 (command status). Fish/Zsh/Bash snippets in `assets/`. Enables: per-pane cwd tracking, jump-to-previous-prompt, failed-command highlight.~~ | `tab.rs`, `main.rs`, `assets/` (~200 lines + snippets) | ✅ `ce61a2e`
 | **D5. SGR 4 underline** | Add `underline` flag to `CellStyle` in `tab.rs`, map to `Attrs::underline(UnderlineStyle::Single)` in `renderer.rs::row_attrs`. Fixes the last ANSI fidelity gap from B2. | `tab.rs`, `renderer.rs` (~30 lines) |
 | **D6. Performance HUD** | `Ctrl+Shift+Alt+F` toggles a corner overlay: frame time (ms), FPS, GPU memory, atlas usage, dirty pane count. Helps catch regressions. | `renderer.rs`, `main.rs` (~100 lines) |
 | **D7. Lazy pane rendering** | Don't shape/upload glyphs for panes scrolled out of view or fully occluded. Only the focused pane + visible neighbors render every frame. | `renderer.rs`, `main.rs` (~150 lines) |
@@ -425,3 +425,10 @@ required — Xvfb alone cannot create a wgpu surface on this machine):
 | **Terminal freezes when search opens** | Keyboard handler consumed ALL keys but only handled Backspace/Escape/printable. Enter, arrows, Ctrl+Shift+F again were silently swallowed. | Only consume search-relevant keys (Backspace, Escape, Enter, printable). Others fall through to normal chrome_action/map_key. Added Enter=next match, Shift+Enter=prev match. | `be31f5b` |
 | **Search bar not visible (panic)** | Double `unwrap()` on `Option<(&str, usize)>` — first unwrap consumed the Option, second panicked. | Properly destructure once with `if let Some((query, match_count)) = search`. | `83f9fb7` |
 | **Search bar invisible when tab strip hidden** | Search bar rendering was inside `if strip { ... }` block. Invisible when `tab_bar=never` or `auto` with 1 tab. | Move search bar rendering outside strip condition — always renders when search active. | `7219b84` |
+
+### Shell Integration (D4) — OSC 7/133/633
+
+| Bug | Root Cause | Fix | Commit |
+|-----|------------|-----|--------|
+| **OSC 7/133/633 sequences not parsed** | PTY reader thread passed all bytes directly to vte processor without intercepting shell integration sequences. | Added `shell_integration.rs` with `preprocess_shell_integration()` called in reader thread before vte. Parses OSC 7 (cwd), OSC 133 (prompt), OSC 633 (status). Non-shell OSC pass through to vte. | `ce61a2e` |
+| **Test failure: OSC 7 URL parsing** | Test expected empty result but OSC 8 hyperlink sequence was consumed instead of passing through. | Only consume OSC sequences we handle (7, 133, 633); return `None` for others so they pass through to vte. | `ce61a2e` (same commit) |
