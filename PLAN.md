@@ -302,6 +302,32 @@ still plain. Add an `underline` flag to `CellStyle` and map it to
 
 ---
 
+## 4. Next work, in priority order (continued)
+
+### Batch D — polish, workflow, and power-user features
+
+Batch D focuses on the "daily driver" experience: finishing the search UX,
+making sessions first-class, adding a command palette, and hardening the
+platform edges. Each item is scoped to ~100–300 lines and testable in
+isolation.
+
+| Item | Description | Scope |
+|------|-------------|-------|
+| **D1. Persistent search bar** | Draw the typed query + match count in the tab strip (reusing the rename overlay pattern). `Enter`/`Shift+Enter` still jump, `Esc` closes. | `main.rs`, `renderer.rs`, `search.rs` (~120 lines) |
+| **D2. Command palette** | `Ctrl+Shift+P` opens a fuzzy-searchable overlay: new tab/split/window, theme picker, font zoom, copy mode, session save/load, config shortcuts. Pure keyboard, no mouse required. | `main.rs`, `renderer.rs`, new `palette.rs` (~250 lines) |
+| **D3. Session manager CLI** | `neoterm session save <name>`, `load <name>`, `list`, `delete`, `autosave on/off`. Sessions are JSON (already implemented in C2); CLI just wires them. | `main.rs`, `session.rs`, `clap` (~150 lines) |
+| **D4. Shell integration** | OSC 7 (cwd), OSC 133 (prompt mark), OSC 633 (command status). Fish/Zsh/Bash snippets in `assets/`. Enables: per-pane cwd tracking, jump-to-previous-prompt, failed-command highlight. | `tab.rs`, `main.rs`, `assets/` (~200 lines + snippets) |
+| **D5. SGR 4 underline** | Add `underline` flag to `CellStyle` in `tab.rs`, map to `Attrs::underline(UnderlineStyle::Single)` in `renderer.rs::row_attrs`. Fixes the last ANSI fidelity gap from B2. | `tab.rs`, `renderer.rs` (~30 lines) |
+| **D6. Performance HUD** | `Ctrl+Shift+Alt+F` toggles a corner overlay: frame time (ms), FPS, GPU memory, atlas usage, dirty pane count. Helps catch regressions. | `renderer.rs`, `main.rs` (~100 lines) |
+| **D7. Lazy pane rendering** | Don't shape/upload glyphs for panes scrolled out of view or fully occluded. Only the focused pane + visible neighbors render every frame. | `renderer.rs`, `main.rs` (~150 lines) |
+| **D8. Windows/ConPTY support** | `portable-pty` already supports ConPTY; wire it behind `cfg(windows)` in `tab.rs::spawn`. Add MSVC CI. | `tab.rs`, `Cargo.toml`, `.github/` (~200 lines) |
+| **D9. Man page + keybindings cheatsheet** | `neoterm.1` (ronn/markdown → man), `KEYBINDINGS.md` (auto-generated from `input.rs::chrome_action`). Install via `install.sh`. | `docs/`, `install.sh`, `input.rs` (~100 lines) |
+| **D10. CI/CD pipeline** | GitHub Actions: `cargo test`, `cargo build --release`, `cargo audit`, `cargo deny`, release artifacts + checksums on tag. | `.github/workflows/` (~150 lines YAML) |
+
+**Suggested order:** D1 → D5 (fidelity) → D2 (UX centerpiece) → D3 (workflow) → D4 (shell integration) → D6/D7 (perf) → D8/D9/D10 (platform/polish).
+
+---
+
 ## 5. Verification recipe
 
 ```bash
