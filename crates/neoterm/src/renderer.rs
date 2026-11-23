@@ -1257,7 +1257,7 @@ impl Renderer {
         for pane in panes {
             total_rows += pane.rows.len();
         }
-        let mut areas = Vec::with_capacity(total_rows + 1);
+        let mut areas = Vec::with_capacity(total_rows + 2);
         if strip {
             areas.push(TextArea {
                 buffer: &self.tab_buffer,
@@ -1273,32 +1273,33 @@ impl Renderer {
                 default_color: self.tab_inactive_fg,
                 custom_glyphs: &[],
             });
+        }
+        
+        // Search bar: render as small floating pill in top-right corner (Ghostty-style)
+        // Always render when search is active, regardless of tab strip visibility
+        if let Some((query, match_count)) = search {
+            let cell = self.advance() * scale;
+            // Small pill: " 🔍 query (N)" with padding
+            let search_text = format!(" 🔍 {}  ({})", query, match_count);
+            let search_w = (search_text.chars().count() as f32 + 2.0) * cell;
+            let pad = 12.0 * scale;
+            let x0 = (w as f32 - search_w - pad);
+            let y0 = 8.0 * scale; // Top margin
             
-            // Search bar: render as small floating pill in top-right corner (Ghostty-style)
-            if let Some((query, match_count)) = search {
-                let cell = self.advance() * scale;
-                // Small pill: " 🔍 query (N)" with padding
-                let search_text = format!(" 🔍 {}  ({})", query, match_count);
-                let search_w = (search_text.chars().count() as f32 + 2.0) * cell;
-                let pad = 12.0 * scale;
-                let x0 = (w as f32 - search_w - pad);
-                let y0 = 8.0 * scale; // Top margin
-                
-                areas.push(TextArea {
-                    buffer: &self.search_buffer,
-                    left: x0,
-                    top: y0,
-                    scale,
-                    bounds: TextBounds {
-                        left: x0 as i32,
-                        top: y0 as i32,
-                        right: (x0 + search_w + pad) as i32,
-                        bottom: (y0 + self.font_size * 1.5 * scale) as i32,
-                    },
-                    default_color: self.tab_active_fg,
-                    custom_glyphs: &[],
-                });
-            }
+            areas.push(TextArea {
+                buffer: &self.search_buffer,
+                left: x0,
+                top: y0,
+                scale,
+                bounds: TextBounds {
+                    left: x0 as i32,
+                    top: y0 as i32,
+                    right: (x0 + search_w + pad) as i32,
+                    bottom: (y0 + self.font_size * 1.5 * scale) as i32,
+                },
+                default_color: self.tab_active_fg,
+                custom_glyphs: &[],
+            });
         }
         
         // Command palette overlay: centered in window
