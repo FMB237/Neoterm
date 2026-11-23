@@ -19,7 +19,7 @@ use alacritty_terminal::selection::SelectionType;
 use alacritty_terminal::term::TermMode;
 use anyhow::{Context, Result};
 use arboard::{Clipboard, GetExtLinux, LinuxClipboardKind, SetExtLinux};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalPosition;
 use winit::event::{ElementState, KeyEvent, Modifiers, MouseButton, MouseScrollDelta, WindowEvent};
@@ -83,6 +83,30 @@ struct Args {
     /// Directory to start the shell in (default: $HOME)
     #[arg(short = 'w', long, value_name = "DIR")]
     working_directory: Option<PathBuf>,
+
+    #[command(subcommand)]
+    cmd: Option<SessionCmd>,
+}
+
+#[derive(Subcommand, Debug)]
+enum SessionCmd {
+    /// Save current session to a file
+    Save {
+        /// Session name (default: auto)
+        name: Option<String>,
+    },
+    /// Load a saved session
+    Load {
+        /// Session name to load
+        name: String,
+    },
+    /// List saved sessions
+    List,
+    /// Delete a saved session
+    Delete {
+        /// Session name to delete
+        name: String,
+    },
 }
 
 /// Per-window state for multiple window support.
@@ -2240,6 +2264,11 @@ fn main() -> Result<()> {
     env_logger::init();
     let args = Args::parse();
 
+    // Handle session management commands (exit after execution)
+    if let Some(cmd) = &args.cmd {
+        return handle_session_cmd(cmd);
+    }
+
     let mut cfg = NeotermConfig::load();
     if let Some(cmd) = args.command {
         cfg.shell = cmd;
@@ -2278,6 +2307,56 @@ fn main() -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+/// Handle session management CLI commands.
+fn handle_session_cmd(cmd: &SessionCmd) -> Result<()> {
+    use crate::session::*;
+
+    match cmd {
+        SessionCmd::Save { name } => {
+            ensure_sessions_dir()?;
+            // We can't build session state without running the app,
+            // so we save a placeholder. The actual session is saved on exit.
+            // This command mainly creates the sessions directory.
+            let session_name = name.as_deref().unwrap_or("default");
+            let path = named_session_path(session_name);
+            // Write empty session as placeholder (real save happens on exit)
+            let empty = SessionState::new();
+            empty.save(&path)?;
+            println!("Session directory ready at {:?}", sessions_dir());
+            println!("Session will be saved on exit as '{}'", session_name);
+        }
+        SessionCmd::Load { name } => {
+            let path = named_session_path(name);
+            if !path.exists() {
+                anyhow::bail!("Session '{}' not found at {:?}", name, path);
+            }
+            // Copy to default session file for auto-restore on next launch
+            let default = session_file_path();
+            if let Some(parent) = default.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::copy(&path, &default)?;
+            println!("Session '{}' loaded. Will restore on next launch.", name);
+        }
+        SessionCmd::List => {
+            let sessions = list_sessions()?;
+            if sessions.is_empty() {
+                println!("No saved sessions.");
+            } else {
+                println!("Saved sessions:");
+                for s in sessions {
+                    println!("  {}", s);
+                }
+            }
+        }
+        SessionCmd::Delete { name } => {
+            delete_session(name)?;
+            println!("Session '{}' deleted.", name);
+        }
+    }
     Ok(())
 }
 

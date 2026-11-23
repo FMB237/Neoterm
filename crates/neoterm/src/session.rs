@@ -289,8 +289,64 @@ fn restore_node_state(
     }
 }
 
-/// Get the session file path.
+/// Get the session file path (default session).
 pub fn session_file_path() -> PathBuf {
     let config_dir = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
     config_dir.join("neoterm").join("session.json")
+}
+
+/// Get the sessions directory path.
+pub fn sessions_dir() -> PathBuf {
+    let config_dir = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
+    config_dir.join("neoterm").join("sessions")
+}
+
+/// Get a named session file path.
+pub fn named_session_path(name: &str) -> PathBuf {
+    let dir = sessions_dir();
+    // Sanitize name: only alphanumeric, dash, underscore
+    let safe: String = name.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect();
+    if safe.is_empty() {
+        dir.join("default.json")
+    } else {
+        dir.join(format!("{}.json", safe))
+    }
+}
+
+/// List all saved session names.
+pub fn list_sessions() -> Result<Vec<String>> {
+    let dir = sessions_dir();
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) == Some("json") {
+            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                names.push(stem.to_string());
+            }
+        }
+    }
+    names.sort();
+    Ok(names)
+}
+
+/// Delete a named session.
+pub fn delete_session(name: &str) -> Result<()> {
+    let path = named_session_path(name);
+    if path.exists() {
+        std::fs::remove_file(path).context("delete session file")?;
+    }
+    Ok(())
+}
+
+/// Ensure sessions directory exists.
+pub fn ensure_sessions_dir() -> Result<()> {
+    let dir = sessions_dir();
+    if !dir.exists() {
+        std::fs::create_dir_all(dir).context("create sessions directory")?;
+    }
+    Ok(())
 }
