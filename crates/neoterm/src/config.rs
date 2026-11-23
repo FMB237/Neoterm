@@ -328,15 +328,15 @@ fn default_blur() -> String {
 impl Default for NeotermConfig {
     fn default() -> Self {
         Self {
-            font_family: "monospace".to_string(),
-            font_size: 15.0,
-            cols: 80,
-            rows: 24,
-            scrollback_lines: 10_000,
+            font_family: "JetBrains Mono, monospace".to_string(),
+            font_size: 14.0,
+            cols: 100,
+            rows: 30,
+            scrollback_lines: 50_000,
             shell: std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string()),
             tab_bar: default_tab_bar(),
             bell: default_bell(),
-            transparency: 0.0,
+            transparency: 0.05,
             blur: default_blur(),
             theme: Theme::default(),
         }
