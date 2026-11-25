@@ -220,7 +220,6 @@ pub fn chrome_action(key: &Key, mods: ModifiersState) -> Option<InputAction> {
                 "T" => return Some(InputAction::NewTab),
                 "W" => return Some(InputAction::ClosePane),
                 "N" => return Some(InputAction::NewWindow),
-                "P" => return Some(InputAction::PrevTab),
                 "C" => return Some(InputAction::Copy),
                 "V" => return Some(InputAction::Paste),
                 "F" => return Some(InputAction::SearchToggle),
@@ -252,6 +251,10 @@ pub fn chrome_action(key: &Key, mods: ModifiersState) -> Option<InputAction> {
                     if (1..=9).contains(&n) {
                         return Some(InputAction::SelectTab(n - 1));
                     }
+                }
+                // Ctrl+P goes to previous tab (Ctrl+Shift+P is palette).
+                if s.eq_ignore_ascii_case("p") {
+                    return Some(InputAction::PrevTab);
                 }
             }
             _ => {}
@@ -359,5 +362,24 @@ mod tests {
         ));
         // Lowercase (no shift) is not a chrome shortcut.
         assert!(press("r", ModifiersState::CONTROL).is_none());
+    }
+
+    /// Ctrl+Shift+P opens the command palette (not PrevTab).
+    #[test]
+    fn palette_toggle_shortcut_maps() {
+        assert!(matches!(
+            press("P", ctrl_shift()),
+            Some(InputAction::PaletteToggle)
+        ));
+        // Ctrl+P (without shift) goes to previous tab.
+        assert!(matches!(
+            press("p", ModifiersState::CONTROL),
+            Some(InputAction::PrevTab)
+        ));
+        // Ctrl+Shift+P no longer maps to PrevTab.
+        assert!(!matches!(
+            press("P", ctrl_shift()),
+            Some(InputAction::PrevTab)
+        ));
     }
 }
