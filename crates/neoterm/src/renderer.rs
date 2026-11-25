@@ -1254,6 +1254,81 @@ impl Renderer {
             }
         }
 
+        // Command palette panel: background quads must be pushed BEFORE the
+        // upload below or they never reach the GPU. The matching TextArea is
+        // pushed after the pane rows so the text sits on top.
+        let mut palette_rect: Option<(f32, f32, f32, f32)> = None;
+        if let Some(palette) = palette {
+            if palette.visible {
+                let cell = self.advance() * scale;
+                let line_h = self.font_size * 1.3 * scale;
+                let pad = 16.0 * scale;
+
+                let selected_idx = palette.selected.min(palette.filtered.len().saturating_sub(1));
+                let item_count = palette.filtered.len();
+                let content_lines = 1 + item_count * 4;
+                let panel_w = (70.0 * cell).max(200.0);
+                let panel_h = (content_lines as f32 * line_h * 1.1) + pad * 2.0;
+                let x0 = (w as f32 - panel_w) / 2.0;
+                let y0 = (h as f32 - panel_h) / 2.0;
+
+                // Panel background (linearized for the sRGB swapchain)
+                let hair = scale.max(1.0);
+                let panel_bg = crate::config::NeotermConfig::srgb8_to_linear(24);
+                push_quad(
+                    &mut bg_verts,
+                    x0,
+                    y0,
+                    x0 + panel_w,
+                    y0 + panel_h,
+                    w as f32,
+                    h as f32,
+                    [panel_bg, panel_bg, panel_bg * 1.06, 0.95],
+                );
+                // Border
+                let border = crate::config::NeotermConfig::srgb8_to_linear(90);
+                for (rx0, ry0, rx1, ry1) in [
+                    (x0, y0, x0 + panel_w, y0 + hair),
+                    (x0, y0 + panel_h - hair, x0 + panel_w, y0 + panel_h),
+                    (x0, y0, x0 + hair, y0 + panel_h),
+                    (x0 + panel_w - hair, y0, x0 + panel_w, y0 + panel_h),
+                ] {
+                    push_quad(
+                        &mut bg_verts,
+                        rx0,
+                        ry0,
+                        rx1,
+                        ry1,
+                        w as f32,
+                        h as f32,
+                        [border, border, border, 1.0],
+                    );
+                }
+
+                // Highlight behind the selected item
+                if item_count > 0 {
+                    let query_bar_h = line_h * 1.1;
+                    let gap_h = line_h * 0.3;
+                    let item_y = y0 + pad + query_bar_h + gap_h
+                        + selected_idx as f32 * (line_h * 2.2 + gap_h * 2.0);
+                    let highlight_h = line_h * 2.2;
+                    let hl_color = crate::config::NeotermConfig::srgb8_to_linear(60);
+                    push_quad(
+                        &mut bg_verts,
+                        x0 + pad,
+                        item_y,
+                        x0 + panel_w - pad,
+                        item_y + highlight_h,
+                        w as f32,
+                        h as f32,
+                        [hl_color, hl_color, hl_color, 0.8],
+                    );
+                }
+
+                palette_rect = Some((x0 + pad * 1.5, y0 + pad, x0 + panel_w - pad * 1.5, y0 + panel_h - pad));
+            }
+        }
+
         // Upload capped at the preallocated vertex buffer.
         bg_verts.truncate(MAX_BG_RECTS * SEL_VERTS_PER_RECT);
         let bg_count = bg_verts.len() as u32;
@@ -1502,121 +1577,6 @@ impl Renderer {
             });
         }
         
-        // Command palette overlay: centered Ghostty-style panel
-        if let Some(palette) = palette {
-            if palette.visible {
-                let cell = self.advance() * scale;
-                let line_h = self.font_size * 1.3 * scale;
-                let pad = 16.0 * scale;
-
-                // Calculate panel dimensions based on filtered commands
-                let selected_idx = palette.selected.min(palette.filtered.len().saturating_sub(1));
-                let item_count = palette.filtered.len();
-                let content_lines = 1 + item_count * 4; // query bar + items
-                // Minimum panel width so it's visible even with no commands
-                let panel_w = (70.0 * cell).max(200.0);
-                let panel_h = (content_lines as f32 * line_h * 1.1) + pad * 2.0;
-                let x0 = (w as f32 - panel_w) / 2.0;
-                let y0 = (h as f32 - panel_h) / 2.0;
-
-                // Semi-transparent background panel (linearized for sRGB swapchain)
-                let hair = scale.max(1.0);
-                let panel_bg = crate::config::NeotermConfig::srgb8_to_linear(24);
-                let panel_color = [panel_bg, panel_bg, panel_bg * 1.06, 0.95];
-                // Main panel background
-                push_quad(
-                    &mut bg_verts,
-                    x0,
-                    y0,
-                    x0 + panel_w,
-                    y0 + panel_h,
-                    w as f32,
-                    h as f32,
-                    panel_color,
-                );
-                // Border
-                let border = crate::config::NeotermConfig::srgb8_to_linear(90);
-                let border_color = [border, border, border, 1.0];
-                push_quad(
-                    &mut bg_verts,
-                    x0,
-                    y0,
-                    x0 + panel_w,
-                    y0 + hair,
-                    w as f32,
-                    h as f32,
-                    border_color,
-                );
-                push_quad(
-                    &mut bg_verts,
-                    x0,
-                    y0 + panel_h - hair,
-                    x0 + panel_w,
-                    y0 + panel_h,
-                    w as f32,
-                    h as f32,
-                    border_color,
-                );
-                push_quad(
-                    &mut bg_verts,
-                    x0,
-                    y0,
-                    x0 + hair,
-                    y0 + panel_h,
-                    w as f32,
-                    h as f32,
-                    border_color,
-                );
-                push_quad(
-                    &mut bg_verts,
-                    x0 + panel_w - hair,
-                    y0,
-                    x0 + panel_w,
-                    y0 + panel_h,
-                    w as f32,
-                    h as f32,
-                    border_color,
-                );
-
-                // Highlight background for selected item
-                if item_count > 0 {
-                    let item_h = line_h * 1.1;
-                    let query_bar_h = line_h * 1.1;
-                    let gap_h = line_h * 0.3;
-                    // Selected item is at: query_bar + gap + selected_idx * (label+desc+gap+gap)
-                    let item_y = y0 + pad + query_bar_h + gap_h + selected_idx as f32 * (line_h * 2.2 + gap_h * 2.0);
-                    let highlight_h = line_h * 2.2;
-                    let hl_color = crate::config::NeotermConfig::srgb8_to_linear(60);
-                    push_quad(
-                        &mut bg_verts,
-                        x0 + pad,
-                        item_y,
-                        x0 + panel_w - pad,
-                        item_y + highlight_h,
-                        w as f32,
-                        h as f32,
-                        [hl_color, hl_color, hl_color, 0.8],
-                    );
-                }
-
-                // Text area for palette content
-                areas.push(TextArea {
-                    buffer: &self.palette_buffer,
-                    left: x0 + pad * 1.5,
-                    top: y0 + pad,
-                    scale,
-                    bounds: TextBounds {
-                        left: (x0 + pad * 1.5) as i32,
-                        top: (y0 + pad) as i32,
-                        right: (x0 + panel_w - pad * 1.5) as i32,
-                        bottom: (y0 + panel_h - pad) as i32,
-                    },
-                    default_color: self.tab_active_fg,
-                    custom_glyphs: &[],
-                });
-            }
-        }
-        
         for pane in panes {
             let bufs = self.pane_buffers.get(&pane.id);
             let Some(bufs) = bufs else {
@@ -1643,6 +1603,26 @@ impl Renderer {
                     custom_glyphs: &[],
                 });
             }
+        }
+
+        // Command palette text: pushed AFTER the pane rows so it renders on
+        // top of the terminal text (its panel background quads are in
+        // `bg_verts` before the upload above).
+        if let Some((px0, py0, px1, py1)) = palette_rect {
+            areas.push(TextArea {
+                buffer: &self.palette_buffer,
+                left: px0,
+                top: py0,
+                scale,
+                bounds: TextBounds {
+                    left: px0 as i32,
+                    top: py0 as i32,
+                    right: px1 as i32,
+                    bottom: py1 as i32,
+                },
+                default_color: self.tab_active_fg,
+                custom_glyphs: &[],
+            });
         }
 
         // The toast label rides over the body.
