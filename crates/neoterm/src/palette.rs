@@ -382,3 +382,60 @@ pub fn fuzzy_score(query: &str, text: &str) -> Option<usize> {
     let t = text.to_lowercase();
     t.find(&q).map(|pos| pos)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn palette_toggle() {
+        let mut state = PaletteState::new();
+        assert!(!state.visible);
+        state.toggle();
+        assert!(state.visible);
+        state.toggle();
+        assert!(!state.visible);
+    }
+
+    #[test]
+    fn palette_filter_matches_commands() {
+        let mut state = PaletteState::new();
+        state.type_char('n');
+        state.type_char('e');
+        state.type_char('w');
+        // Should filter to commands containing "new"
+        assert!(!state.filtered.is_empty());
+        assert!(state
+            .filtered
+            .iter()
+            .any(|&i| state.commands[i].id == "new-tab"
+                || state.commands[i].id == "new-window"));
+    }
+
+    #[test]
+    fn palette_select_next_and_prev() {
+        let mut state = PaletteState::new();
+        state.filter(); // show all
+        let initial = state.selected;
+        state.select_next();
+        assert_eq!(state.selected, (initial + 1) % state.filtered.len());
+        state.select_prev();
+        assert_eq!(state.selected, initial);
+    }
+
+    #[test]
+    fn palette_execute_selected_returns_action() {
+        let mut state = PaletteState::new();
+        state.filter(); // show all
+        state.selected = 0;
+        let action = state.execute_selected();
+        assert!(action.is_some());
+    }
+
+    #[test]
+    fn fuzzy_score_returns_position() {
+        assert_eq!(fuzzy_score("neo", "NeoTerm"), Some(0));
+        assert_eq!(fuzzy_score("term", "NeoTerm"), Some(3));
+        assert_eq!(fuzzy_score("xyz", "NeoTerm"), None);
+    }
+}

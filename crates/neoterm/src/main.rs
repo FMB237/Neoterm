@@ -1111,6 +1111,11 @@ impl App {
         if let Some(tab) = t.active() {
             let layout = tab.layout();
             let focus = tab.active_id();
+            // Scroll position and viewport size for lazy pane visibility.
+            let (_, viewport_rows) = tab.grid_size();
+            let scroll_offset = tab.display_offset() as i32;
+            let view_top = scroll_offset;
+            let view_bottom = scroll_offset + viewport_rows as i32;
             // Search highlights: grid line -> viewport row mapping
             let search_rows = ws.search.as_ref().and_then(|s| {
                 if s.matches().is_empty() {
@@ -1124,9 +1129,19 @@ impl App {
             });
             for (id, rect) in layout.panes {
                 if let Some(pane) = tab.pane(id) {
+                    // Lazy rendering: skip panes outside the viewport.
+                    // Always render the focused pane so its cursor shows.
+                    let pane_row = rect.row as i32;
+                    let pane_row_end = (rect.row + rect.rows) as i32;
+                    let pane_visible = (id == focus)
+                        || (pane_row < view_bottom && pane_row_end > view_top);
                     let cursor_on = if id == focus { blink } else { true };
                     let (mut rows, cursor) =
-                        pane.rendered_rows(fg, bg, cursor_on);
+                        if pane_visible {
+                            pane.rendered_rows(fg, bg, cursor_on)
+                        } else {
+                            (Vec::new(), None)
+                        };
                     // Apply search match highlights to visible rows.
                     if let Some((state, offset, rows_cnt, highlight)) = search_rows.as_ref() {
                         if id == focus {
@@ -1180,6 +1195,7 @@ impl App {
                         rows,
                         cursor,
                         focused: id == focus,
+                        visible: pane_visible,
                     });
                 }
             }
@@ -1572,7 +1588,7 @@ impl App {
             PaletteAction::ThemeCustom => self.set_theme(ws, "custom"),
             // Session actions
             PaletteAction::SessionSave => self.handle_session_save(ws),
-            PaletteAction::SessionLoad => self.handle_session_load(ws),
+            PaletteAction::SessionLoad => self.handle_session_load(event_loop, ws),
             PaletteAction::SessionList => self.handle_session_list(ws),
             // Performance HUD
             PaletteAction::TogglePerformanceHud => {
@@ -1681,14 +1697,52 @@ impl App {
     }
     
     /// Handle session load from palette.
-    fn handle_session_load(&mut self, ws: &mut WindowState) {
-        // For now just log - would need a session picker UI
-        log::info!("Session load from palette not yet implemented");
+    fn handle_session_load(&mut self, event_loop: &ActiveEventLoop, ws: &mut WindowState) {
+        use crate::session::{list_sessions, named_session_path, session_file_path, SessionState};
+        // Load the default session file if it exists
+        let default = session_file_path();
+        if default.exists() {
+            match SessionState::load(&default) {
+                Ok(session) => {
+                    if let Err(e) = restore_session_state(&session, self, event_loop) {
+                        log::error!("Failed to restore session: {}", e);
+                    } else {
+                        log::info!("Session restored from default");
+                    }
+                }
+                Err(e) => log::error!("Failed to load session: {}", e),
+            }
+        } else {
+            // List available sessions
+            match list_sessions() {
+                Ok(sessions) => {
+                    if sessions.is_empty() {
+                        log::info!("No saved sessions found.");
+                    } else {
+                        log::info!("Available sessions: {:?}", sessions);
+                    }
+                }
+                Err(e) => log::error!("Failed to list sessions: {}", e),
+            }
+        }
     }
     
     /// Handle session list from palette.
     fn handle_session_list(&mut self, ws: &mut WindowState) {
-        log::info!("Session list from palette not yet implemented");
+        use crate::session::list_sessions;
+        match list_sessions() {
+            Ok(sessions) => {
+                if sessions.is_empty() {
+                    log::info!("No saved sessions found.");
+                } else {
+                    log::info!("Saved sessions:");
+                    for s in &sessions {
+                        log::info!("  {}", s);
+                    }
+                }
+            }
+            Err(e) => log::error!("Failed to list sessions: {}", e),
+        }
     }
     
     // ---- Copymode (Vi-style selection) ----
@@ -2200,9 +2254,20 @@ impl App {
             return;
         }
         // A live palette owns the keyboard: keys navigate/filter/select.
-        // Check visibility first without mutable borrow.
         let palette_visible = ws.palette.as_ref().map(|p| p.visible).unwrap_or(false);
         if palette_visible && event.state == ElementState::Pressed {
+            // Ctrl+Shift+P toggles the palette closed even when open
+            let ctrl_shift_p = self.mods.state().control_key()
+                && self.mods.state().shift_key()
+                && matches!(&event.logical_key, Key::Character(s) if s.eq_ignore_ascii_case("p"));
+            if ctrl_shift_p {
+                if let Some(palette) = ws.palette.as_mut() {
+                    palette.close();
+                }
+                ws.force_draw = true;
+                ws.window.request_redraw();
+                return;
+            }
             self.handle_palette_key(event_loop, ws, event);
             return;
         }
@@ -2761,4 +2826,41 @@ fn resolve_cwd(dir: Option<PathBuf>) -> Result<PathBuf> {
         anyhow::bail!("--working-directory is not a directory: {}", path.display());
     }
     Ok(path)
+}
+
+/// Performance HUD tests (D6).
+#[cfg(test)]
+mod hud_tests {
+    use super::*;
+
+    #[test]
+    fn hud_stats_new_defaults() {
+        let stats = HudStats::new();
+        assert_eq!(stats.frame_count, 0);
+        assert_eq!(stats.dirty_pane_count, 0);
+        assert_eq!(stats.atlas_usage_pct, 0.0);
+        assert_eq!(stats.avg_frame_ms, 0.0);
+    }
+
+    #[test]
+    fn hud_stats_update_frames() {
+        let mut stats = HudStats::new();
+        stats.update(Duration::from_millis(16), 0, 0.0);
+        assert_eq!(stats.frame_count, 1);
+        assert!(stats.avg_frame_ms > 0.0);
+        assert!(stats.fps() > 0.0);
+    }
+
+    #[test]
+    fn hud_stats_dirty_pane_count() {
+        let mut stats = HudStats::new();
+        stats.update(Duration::from_millis(10), 3, 0.0);
+        assert_eq!(stats.dirty_pane_count, 3);
+    }
+
+    #[test]
+    fn hud_stats_fps_zero_when_no_frames() {
+        let stats = HudStats::new();
+        assert_eq!(stats.fps(), 0.0);
+    }
 }

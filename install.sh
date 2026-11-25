@@ -28,6 +28,8 @@ DESTDIR="${DESTDIR:-}"
 BIN="$DESTDIR$PREFIX/bin/neoterm"
 APPS="$DESTDIR$PREFIX/share/applications"
 ICONS="$DESTDIR$PREFIX/share/icons/hicolor/scalable/apps"
+MAN="$DESTDIR$PREFIX/share/man/man1"
+DOCS="$DESTDIR$PREFIX/share/doc/neoterm"
 
 echo "==> building NeoTerm (release)"
 cargo build --release
@@ -36,10 +38,13 @@ echo "==> installing to $PREFIX"
 install -Dm755 target/release/neoterm "$BIN"
 install -Dm644 assets/neoterm.desktop "$APPS/neoterm.desktop"
 install -Dm644 assets/neoterm.svg "$ICONS/neoterm.svg"
+install -Dm644 docs/neoterm.1 "$MAN/neoterm.1"
+install -Dm644 docs/KEYBINDINGS.md "$DOCS/KEYBINDINGS.md"
 
 if [ -z "$DESTDIR" ]; then
     command -v update-desktop-database >/dev/null && update-desktop-database "$APPS" || true
     command -v gtk-update-icon-cache >/dev/null && gtk-update-icon-cache -f -t "$DESTDIR$PREFIX/share/icons/hicolor" || true
+    command -v mandb >/dev/null && mandb "$MAN" || true
 fi
 
 echo "==> verifying"

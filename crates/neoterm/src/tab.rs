@@ -188,6 +188,15 @@ impl Pane {
         cmd.env("COLORTERM", "truecolor");
         cmd.cwd(cwd);
 
+        // Windows/ConPTY specific configuration
+        #[cfg(target_os = "windows")]
+        {
+            // ConPTY on Windows: use Windows-appropriate defaults
+            cmd.env("WT_SESSION", "neoterm");
+            // On Windows, ConPTY handles the PTY differently; no extra setup needed
+            // portable-pty's native_pty_system() returns ConPtySystem on Windows
+        }
+
         let child = pair.slave.spawn_command(cmd).context("spawn shell")?;
 
         let mut term_config = TermConfig::default();

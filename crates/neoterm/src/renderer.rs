@@ -31,6 +31,9 @@ pub struct PaneDraw {
     pub cursor: Option<(usize, usize, CursorShape)>,
     /// This pane holds the keyboard focus (outlined; the others recede).
     pub focused: bool,
+    /// Whether this pane is visible in the current viewport (lazy rendering).
+    /// Invisible panes skip text shaping/upload.
+    pub visible: bool,
 }
 
 /// Viewport scroll state driving the scrollbar (built per frame in main).
@@ -752,6 +755,10 @@ impl Renderer {
         let defaults = Attrs::new().family(family).color(self.fg);
         let m = Metrics::new(self.font_size, self.font_size * LINE_HEIGHT);
         for pane in panes {
+            // Lazy rendering: skip text shaping for invisible panes.
+            if !pane.visible {
+                continue;
+            }
             let bufs = self.pane_buffers.entry(pane.id).or_default();
             while bufs.len() < pane.rows.len() {
                 let mut buf = Buffer::new(&mut self.font_system, m);

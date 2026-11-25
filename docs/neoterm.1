@@ -1,0 +1,66 @@
+.\" Man page for neoterm
+.\" Generated from docs/KEYBINDINGS.md
+.TH NEOTERM 1 "2026-11-25" "NeoTerm 0.3.0" "NeoTerm User Manual"
+.SH NAME
+neoterm \- GPU terminal emulator with tabs, splits, and themes
+.SH SYNOPSIS
+.B neoterm
+[\-e \fIcommand\fR] [\-w \fIdirectory\fR] [\fIcmd\fR]
+.SH DESCRIPTION
+.B NeoTerm
+is a GPU-accelerated terminal emulator written in pure Rust. It uses winit for
+windowing, wgpu for rendering, glyphon/cosmic-text for text shaping, and
+alacritty_terminal for terminal emulation.
+.SH OPTIONS
+.TP
+.B \-e, \-\-command \fIcommand\fR
+Run the given command instead of the default shell.
+.TP
+.B \-w, \-\-working-directory \fIdirectory\fR
+Start the shell in the given directory (default: $HOME).
+.TP
+\fIcmd\fR
+One of: \fBsession\fR, \fBtheme\fR. Run \fBneoterm cmd --help\fR for details.
+.SH KEYBINDINGS
+All keybindings are listed in \fBKEYBINDINGS.md\fR (also installed with the
+man page). Summary:
+.TP
+.B Tab management
+Ctrl+Shift+T new tab, Ctrl+Shift+W close pane, Ctrl+Shift+N new window,
+Ctrl+Tab/Shift+Tab switch tabs, Ctrl+1..9 select tab.
+.TP
+.B Splits
+Ctrl+Shift+E split vertically, Ctrl+Shift+O split horizontally,
+Alt+arrows move focus, Ctrl+Shift+Z zoom pane.
+.TP
+.B Clipboard
+Ctrl+Shift+C copy, Ctrl+Shift+V paste, middle-click PRIMARY paste (X11).
+.TP
+.B Font
+Ctrl+Shift++/= zoom in, Ctrl+Shift+-/_- zoom out, Ctrl+Shift+0/) reset.
+.TP
+.B Search
+Ctrl+Shift+F open search, Enter next match, Shift+Enter previous, Esc close.
+.TP
+.B Palette
+Ctrl+Shift+P open command palette.
+.TP
+.B HUD
+Ctrl+Shift+Alt+F toggle performance HUD.
+.SH CONFIGURATION
+Configuration is stored in TOML format at $XDG_CONFIG_HOME/neoterm/config.toml
+(or ~/.config/neoterm/config.toml). The file is watched for changes and
+reloaded automatically.
+.SH FILES
+.TP
+~/.config/neoterm/config.toml
+User configuration.
+.TP
+~/.local/share/neoterm/sessions/
+Saved sessions directory.
+.SH SEE ALSO
+KEYBINDINGS.md(5), neoterm.desktop(5)
+.SH AUTHOR
+NeoTerm project
+.SH BUGS
+Report bugs at https://github.com/FMB237/Neoterm/issues
