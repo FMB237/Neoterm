@@ -46,6 +46,18 @@ impl SearchState {
         }
     }
 
+    /// Get the current match index (0-based).
+    pub fn current_index(&self) -> usize {
+        self.current
+    }
+
+    /// Set the current match index (clamped to match list length).
+    pub fn set_current(&mut self, index: usize) {
+        if !self.matches.is_empty() {
+            self.current = index.min(self.matches.len().saturating_sub(1));
+        }
+    }
+
     /// Scan every grid line of `term` (scrollback history + viewport) and
     /// populate `matches`. Call this whenever the query or the term
     /// content changes.

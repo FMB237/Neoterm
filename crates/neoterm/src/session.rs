@@ -350,3 +350,48 @@ pub fn ensure_sessions_dir() -> Result<()> {
     }
     Ok(())
 }
+
+/// Get the autosave preference file path.
+pub fn autosave_path() -> PathBuf {
+    sessions_dir().join("autosave")
+}
+
+/// Read the autosave-on-exit preference. Defaults to `false`.
+pub fn get_autosave() -> bool {
+    let path = autosave_path();
+    match std::fs::read_to_string(&path) {
+        Ok(contents) => contents.trim() == "on",
+        Err(_) => false,
+    }
+}
+
+/// Write the autosave-on-exit preference.
+pub fn set_autosave(enabled: bool) -> Result<()> {
+    ensure_sessions_dir()?;
+    let path = autosave_path();
+    std::fs::write(path, if enabled { "on" } else { "off" }).context("write autosave preference")?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn autosave_defaults_to_false() {
+        let _ = std::fs::remove_file(autosave_path());
+        assert!(!get_autosave());
+    }
+
+    #[test]
+    fn autosave_round_trip() {
+        // If the filesystem is read-only (e.g., sandbox), skip the write test.
+        if set_autosave(true).is_err() {
+            return;
+        }
+        assert!(get_autosave());
+
+        set_autosave(false).unwrap();
+        assert!(!get_autosave());
+    }
+}

@@ -116,6 +116,8 @@ pub struct Renderer {
     search_buffer: Buffer,
     /// Command palette buffer (query + filtered commands), drawn as centered overlay.
     palette_buffer: Buffer,
+    /// HUD overlay stats (frame time, FPS, dirty pane count), drawn in corner.
+    hud_buffer: Buffer,
     /// Text buffers + shaped-row caches per pane id (rebuilt on row-count
     /// change; pruned when panes close).
     pane_buffers: HashMap<PaneId, Vec<Buffer>>,
@@ -236,6 +238,7 @@ impl Renderer {
         let mut toast_buffer = Buffer::new(&mut font_system, Metrics::new(font_size, line_height));
         let mut search_buffer = Buffer::new(&mut font_system, Metrics::new(font_size, line_height));
         let mut palette_buffer = Buffer::new(&mut font_system, Metrics::new(font_size, line_height));
+        let mut hud_buffer = Buffer::new(&mut font_system, Metrics::new(font_size, line_height));
         tab_buffer.set_size(Some(2000.0), Some(40.0));
         palette_buffer.set_size(Some(800.0), Some(600.0));
 
@@ -300,6 +303,7 @@ impl Renderer {
             toast_buffer,
             search_buffer,
             palette_buffer,
+            hud_buffer,
             pane_buffers: HashMap::new(),
             pane_rows: HashMap::new(),
             window,
@@ -562,8 +566,9 @@ impl Renderer {
         dividers: &[CellRect],
         scroll: ScrollState,
         strip: bool,
-        search: Option<(&str, usize)>, // (query, match_count)
+        search: Option<(&str, usize, usize)>, // (query, match_count, current_match_1based)
         palette: Option<&crate::palette::PaletteState>,
+        hud: Option<&crate::HudStats>,
     ) {
         let scale = self.window.scale_factor() as f32;
         let w = self.surface_config.width;
@@ -678,48 +683,6 @@ impl Renderer {
             self.tab_buffer.shape_until_scroll(&mut self.font_system, false);
             self.last_tab_text = tab_text.clone();
             self.last_hover = hover;
-        }
-        
-        // Search bar: shape query + match count when search is active
-        if let Some((query, match_count)) = search {
-            // Ghostty-style: small floating pill in top-right corner
-            let search_text = format!(" 🔍 {}  ({})", query, match_count);
-            let base = Attrs::new().family(family).color(self.tab_active_fg);
-            let bold_attrs = Attrs::new()
-                .family(family)
-                .color(Color::rgb(255, 255, 255))
-                .weight(Weight::BOLD);
-            
-            // Split into " 🔍 " (icon), query, and "  (N)" (count)
-            let icon_len = 2; // " 🔍"
-            let query_len = query.chars().count();
-            let count_text = format!("  ({})", match_count);
-            let count_len = count_text.chars().count();
-            
-            let mut cuts = vec![0, icon_len, icon_len + query_len, search_text.len()];
-            cuts.sort_unstable();
-            cuts.dedup();
-            
-            let spans: Vec<(&str, Attrs)> = cuts
-                .windows(2)
-                .filter_map(|w| {
-                    let (a, b) = (w[0], w[1]);
-                    if a >= b {
-                        return None;
-                    }
-                    let piece = search_text.get(a..b)?;
-                    let is_query = a >= icon_len && b <= icon_len + query_len;
-                    let attrs = if is_query {
-                        bold_attrs.clone()
-                    } else {
-                        base.clone()
-                    };
-                    Some((piece, attrs))
-                })
-                .collect();
-            
-            self.search_buffer.set_rich_text(spans, &base, Shaping::Advanced, None);
-            self.search_buffer.shape_until_scroll(&mut self.font_system, false);
         }
         
         // Palette: shape query + filtered commands when palette is active
@@ -1275,27 +1238,200 @@ impl Renderer {
             });
         }
         
-        // Search bar: render as small floating pill in top-right corner (Ghostty-style)
-        // Always render when search is active, regardless of tab strip visibility
-        if let Some((query, match_count)) = search {
+        // Search bar: compact floating pill at top-right corner.
+        // Shows magnifying glass icon, query text, and current/total match count.
+        // Always rendered when search is active, regardless of tab strip visibility.
+        let mut search_rect: Option<(f32, f32, f32, f32)> = None;
+        if let Some((query, match_count, current)) = search {
+            let line_h = self.font_size * 1.3 * scale;
+            let pad = 10.0 * scale;
             let cell = self.advance() * scale;
-            // Small pill: " 🔍 query (N)" with padding
-            let search_text = format!(" 🔍 {}  ({})", query, match_count);
-            let search_w = (search_text.chars().count() as f32 + 2.0) * cell;
-            let pad = 12.0 * scale;
-            let x0 = (w as f32 - search_w - pad);
-            let y0 = 8.0 * scale; // Top margin
-            
+
+            // Compact box size — not full width
+            let icon_w = cell;                       // space for magnifying glass
+            let query_w = cell * 14.0;               // room for ~14 chars of query
+            let count_w = cell * 8.0;                // room for " 9/99 "
+            let box_w = icon_w + query_w + count_w + pad * 4.0;
+            let box_h = line_h + pad * 0.8;
+
+            // Position at top-right corner, inside the body area
+            let box_x1 = w as f32 - PAD_X * scale;
+            let box_x0 = box_x1 - box_w;
+            let box_y0 = 8.0 * scale;
+            let box_y1 = box_y0 + box_h;
+
+            // Background pill
+            push_quad(
+                &mut bg_verts,
+                box_x0,
+                box_y0,
+                box_x1,
+                box_y1,
+                w as f32,
+                h as f32,
+                with_alpha(self.tab_active_bg, 0.95),
+            );
+
+            // Border hairline around the box
+            let hair = scale.max(1.0);
+            push_quad(
+                &mut bg_verts,
+                box_x0,
+                box_y0,
+                box_x1,
+                box_y0 + hair,
+                w as f32,
+                h as f32,
+                with_alpha(self.tab_bar_border, 1.0),
+            );
+            push_quad(
+                &mut bg_verts,
+                box_x0,
+                box_y1 - hair,
+                box_x1,
+                box_y1,
+                w as f32,
+                h as f32,
+                with_alpha(self.tab_bar_border, 1.0),
+            );
+            push_quad(
+                &mut bg_verts,
+                box_x0,
+                box_y0,
+                box_x0 + hair,
+                box_y1,
+                w as f32,
+                h as f32,
+                with_alpha(self.tab_bar_border, 1.0),
+            );
+            push_quad(
+                &mut bg_verts,
+                box_x1 - hair,
+                box_y0,
+                box_x1,
+                box_y1,
+                w as f32,
+                h as f32,
+                with_alpha(self.tab_bar_border, 1.0),
+            );
+
+            search_rect = Some((box_x0, box_y0, box_x1, box_y1));
+
+            // Shape search label: icon + query + match count
+            let base = Attrs::new().family(family).color(self.tab_active_fg);
+            let query_attrs = Attrs::new()
+                .family(family)
+                .color(Color::rgb(255, 255, 255))
+                .weight(Weight::BOLD);
+            let count = format!(" ({})", match_count);
+            let spans: Vec<(&str, Attrs)> = vec![
+                ("🔍 ", base.clone()),
+                (query, query_attrs),
+                (count.as_str(), base.clone()),
+            ];
+            self.search_buffer.set_rich_text(spans, &base, Shaping::Advanced, None);
+            self.search_buffer.shape_until_scroll(&mut self.font_system, false);
+        }
+
+        // Draw the search label on top of the background pill
+        if let Some((x0, y0, x1, y1)) = search_rect {
+            let pad = 10.0 * scale;
             areas.push(TextArea {
                 buffer: &self.search_buffer,
-                left: x0,
-                top: y0,
+                left: x0 + pad,
+                top: y0 + pad * 0.3,
                 scale,
                 bounds: TextBounds {
                     left: x0 as i32,
                     top: y0 as i32,
-                    right: (x0 + search_w + pad) as i32,
-                    bottom: (y0 + self.font_size * 1.5 * scale) as i32,
+                    right: x1 as i32,
+                    bottom: y1 as i32,
+                },
+                default_color: self.tab_active_fg,
+                custom_glyphs: &[],
+            });
+        }
+
+        // Performance HUD: corner overlay with frame time, FPS, dirty pane count.
+        if let Some(stats) = hud {
+            let cell = self.advance() * scale;
+            let line_h = self.font_size * 1.3 * scale;
+            let pad = 8.0 * scale;
+
+            // HUD panel at bottom-right corner
+            let lines = 4;
+            let hud_w = cell * 32.0; // wide enough for longest label + value
+            let hud_h = line_h * lines as f32 + pad * 2.0;
+            let x0 = w as f32 - hud_w - pad;
+            let y0 = h as f32 - hud_h - pad;
+
+            // Background panel (semi-transparent)
+            push_quad(
+                &mut bg_verts,
+                x0,
+                y0,
+                x0 + hud_w,
+                y0 + hud_h,
+                w as f32,
+                h as f32,
+                [0.0, 0.0, 0.0, 0.7],
+            );
+            // Border
+            let hair = scale.max(1.0);
+            push_quad(
+                &mut bg_verts,
+                x0,
+                y0,
+                x0 + hud_w,
+                y0 + hair,
+                w as f32,
+                h as f32,
+                [0.5, 0.5, 0.5, 1.0],
+            );
+
+            // Shape HUD text lines
+            let mut hud_lines: Vec<(String, Attrs)> = Vec::new();
+            let title_attrs = Attrs::new()
+                .family(family)
+                .color(Color::rgb(255, 255, 255))
+                .weight(Weight::BOLD);
+            let value_attrs = Attrs::new()
+                .family(family)
+                .color(Color::rgb(180, 180, 180));
+
+            hud_lines.push((" Performance HUD".to_string(), title_attrs.clone()));
+            hud_lines.push((
+                format!(" Frame time: {:.1} ms", stats.frame_time_ms()),
+                value_attrs.clone(),
+            ));
+            hud_lines.push((
+                format!(" FPS: {:.0}", stats.fps()),
+                value_attrs.clone(),
+            ));
+            hud_lines.push((
+                format!(" Dirty panes: {}", stats.dirty_pane_count),
+                value_attrs.clone(),
+            ));
+
+            let mut spans: Vec<(&str, Attrs)> = Vec::new();
+            for line in hud_lines.iter() {
+                spans.push((line.0.as_str(), line.1.clone()));
+            }
+
+            self.hud_buffer.set_rich_text(spans, &value_attrs, Shaping::Advanced, None);
+            self.hud_buffer
+                .shape_until_scroll(&mut self.font_system, false);
+
+            areas.push(TextArea {
+                buffer: &self.hud_buffer,
+                left: x0 + pad,
+                top: y0 + pad,
+                scale,
+                bounds: TextBounds {
+                    left: x0 as i32,
+                    top: y0 as i32,
+                    right: (x0 + hud_w) as i32,
+                    bottom: (y0 + hud_h) as i32,
                 },
                 default_color: self.tab_active_fg,
                 custom_glyphs: &[],

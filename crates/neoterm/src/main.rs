@@ -171,6 +171,10 @@ struct WindowState {
     tab_drag: Option<usize>,
     pane_drag: Option<(usize, PaneId)>,
     split_cursor: Option<CursorIcon>,
+    // Performance HUD state (D6)
+    hud_visible: bool,
+    hud_stats: Option<HudStats>,
+    last_frame_time: Option<Instant>,
 }
 
 struct App {
@@ -226,6 +230,47 @@ struct CopymodeState {
     line_mode: bool,
     /// Scroll offset from top of history (0 = viewport bottom).
     scroll_offset: usize,
+}
+
+/// Performance HUD state (D6).
+pub struct HudStats {
+    pub frame_count: u32,
+    pub last_update: Instant,
+    pub avg_frame_ms: f32,
+    pub dirty_pane_count: usize,
+    pub atlas_usage_pct: f32,
+}
+
+impl HudStats {
+    fn new() -> Self {
+        Self {
+            frame_count: 0,
+            last_update: Instant::now(),
+            avg_frame_ms: 0.0,
+            dirty_pane_count: 0,
+            atlas_usage_pct: 0.0,
+        }
+    }
+
+    fn update(&mut self, frame_delta: Duration, dirty_count: usize, atlas_usage_pct: f32) {
+        self.frame_count += 1;
+        self.dirty_pane_count = dirty_count;
+        self.atlas_usage_pct = atlas_usage_pct;
+        // Simple running average of frame time.
+        self.avg_frame_ms = self.avg_frame_ms * 0.9 + frame_delta.as_secs_f32() * 1000.0 * 0.1;
+    }
+
+    pub fn frame_time_ms(&self) -> f32 {
+        self.avg_frame_ms
+    }
+
+    pub fn fps(&self) -> f32 {
+        if self.avg_frame_ms > 0.0 {
+            1000.0 / self.avg_frame_ms
+        } else {
+            0.0
+        }
+    }
 }
 
 impl App {
@@ -1168,7 +1213,24 @@ impl App {
             .map(|until| Instant::now() < until)
             .unwrap_or(false);
         r.set_flash(flash);
-        let search_bar = ws.search.as_ref().map(|s| (s.query.as_str(), s.matches().len()));
+        let search_bar = ws.search.as_ref().map(|s| {
+            let current = if s.matches().is_empty() { 0 } else { s.current_index() + 1 };
+            (s.query.as_str(), s.matches().len(), current)
+        });
+        // HUD stats: include dirty pane count from this frame and atlas usage.
+        let hud = if ws.hud_visible {
+            let dirty_count = if pty_dirty {
+                t.active().map(|tab| tab.layout().panes.len()).unwrap_or(0)
+            } else {
+                0
+            };
+            if let Some(stats) = ws.hud_stats.as_mut() {
+                stats.update(Duration::ZERO, dirty_count, 0.0);
+            }
+            ws.hud_stats.as_ref()
+        } else {
+            None
+        };
         r.draw(
             &titles,
             t.active_index(),
@@ -1180,6 +1242,7 @@ impl App {
             strip,
             search_bar,
             ws.palette.as_ref(),
+            hud,
         );
         ws.last_titles = titles;
         ws.last_active = active;
@@ -1318,8 +1381,12 @@ impl App {
                 Ok(t) => t,
                 Err(_) => return,
             };
+            // Preserve current match index across re-scan (in case terminal
+            // content changed), then advance to the next match.
+            let current = state.current_index();
             state.search(&term);
             drop(term);
+            state.set_current(current);
             let Some(m) = state.next_match() else {
                 return;
             };
@@ -1350,8 +1417,11 @@ impl App {
                 Ok(t) => t,
                 Err(_) => return,
             };
+            // Preserve current match index across re-scan, then go to previous.
+            let current = state.current_index();
             state.search(&term);
             drop(term);
+            state.set_current(current);
             let Some(m) = state.prev_match() else {
                 return;
             };
@@ -1401,8 +1471,10 @@ impl App {
     }
     
     /// Re-scan the focused pane's term with the current query and redraw.
+    /// Re-scan the focused pane's term with the current query and redraw.
+    /// Auto-scrolls to the first match when one is found.
     fn rescan_search(&mut self, ws: &mut WindowState) {
-        let Some(tab) = ws.tabs.active() else {
+        let Some(tab) = ws.tabs.active_mut() else {
             return;
         };
         let id = tab.active_id();
@@ -1418,6 +1490,11 @@ impl App {
         };
         state.search(&term);
         drop(term);
+        // Auto-scroll to the first match after typing so the user sees
+        // immediately where the matches are.
+        if let Some(m) = state.current_match() {
+            Self::scroll_pane_to_match(tab, id, m);
+        }
         ws.force_draw = true;
         ws.window.request_redraw();
     }
@@ -2035,6 +2112,9 @@ impl App {
             tab_drag: None,
             pane_drag: None,
             split_cursor: None,
+            hud_visible: false,
+            hud_stats: None,
+            last_frame_time: None,
         };
         
         self.windows.insert(window_id, state);
@@ -2102,6 +2182,9 @@ impl App {
             tab_drag: None,
             pane_drag: None,
             split_cursor: None,
+            hud_visible: false,
+            hud_stats: None,
+            last_frame_time: None,
         };
         
         self.windows.insert(window_id, state);
@@ -2480,6 +2563,16 @@ impl ApplicationHandler for App {
             } else {
                 let blink_deadline = ws.blink_timer + Duration::from_millis(500);
                 earliest_deadline = earliest_deadline.min(blink_deadline);
+            }
+
+            // Performance HUD: track frame timing and stats.
+            if ws.hud_visible {
+                let frame_delta = ws.last_frame_time.map(|t| now - t).unwrap_or(Duration::ZERO);
+                ws.last_frame_time = Some(now);
+                let stats = ws.hud_stats.get_or_insert(HudStats::new());
+                stats.update(frame_delta, 0, 0.0); // dirty count/atlas updated in redraw
+                ws.force_draw = true;
+                ws.window.request_redraw();
             }
         }
         

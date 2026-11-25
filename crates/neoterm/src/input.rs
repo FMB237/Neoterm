@@ -236,7 +236,7 @@ pub fn chrome_action(key: &Key, mods: ModifiersState) -> Option<InputAction> {
                 "U" => return Some(InputAction::UnpinTab),
                 "B" => return Some(InputAction::BroadcastToggle),
                 " " => return Some(InputAction::CopymodeToggle),
-                "K" => return Some(InputAction::PaletteToggle),
+                "P" => return Some(InputAction::PaletteToggle),
                 _ => {}
             },
             Key::Named(NamedKey::Tab) => return Some(InputAction::NextTab),
