@@ -783,6 +783,16 @@ impl Renderer {
                     }
                 }
 
+                // Show "No results" when nothing matches
+                if total_filtered == 0 && !palette.query.is_empty() {
+                    let no_results_text = "  No results";
+                    str_storage.push(no_results_text.to_string());
+                    let no_results_attrs = Attrs::new()
+                        .family(family)
+                        .color(Color::rgb(140, 140, 140));
+                    line_defs.push((str_storage.len() - 1, no_results_attrs));
+                }
+
                 // Phase 2: Build spans from storage (no more mutations to str_storage).
                 let mut spans: Vec<(&str, Attrs)> = Vec::with_capacity(line_defs.len());
                 for (idx, attrs) in line_defs {
@@ -1502,17 +1512,17 @@ impl Renderer {
                 // Calculate panel dimensions based on filtered commands
                 let selected_idx = palette.selected.min(palette.filtered.len().saturating_sub(1));
                 let item_count = palette.filtered.len();
-                // Each command takes: query bar(1) + gap(1) + label(1) + keybind(1) + desc(1) + gap(1) = ~6 lines
-                // But we want it compact like Ghostty
-                let lines_per_item = 4; // label+keybind, desc, gap, gap
-                let content_lines = 1 + item_count * lines_per_item; // query bar + items
-                let panel_w = 70.0 * cell;
+                let content_lines = 1 + item_count * 4; // query bar + items
+                // Minimum panel width so it's visible even with no commands
+                let panel_w = (70.0 * cell).max(200.0);
                 let panel_h = (content_lines as f32 * line_h * 1.1) + pad * 2.0;
                 let x0 = (w as f32 - panel_w) / 2.0;
                 let y0 = (h as f32 - panel_h) / 2.0;
 
-                // Semi-transparent background panel with rounded corners (simulated with quads)
+                // Semi-transparent background panel (linearized for sRGB swapchain)
                 let hair = scale.max(1.0);
+                let panel_bg = crate::config::NeotermConfig::srgb8_to_linear(24);
+                let panel_color = [panel_bg, panel_bg, panel_bg * 1.06, 0.95];
                 // Main panel background
                 push_quad(
                     &mut bg_verts,
@@ -1522,9 +1532,11 @@ impl Renderer {
                     y0 + panel_h,
                     w as f32,
                     h as f32,
-                    [0.15, 0.15, 0.17, 0.95], // Dark semi-transparent panel
+                    panel_color,
                 );
                 // Border
+                let border = crate::config::NeotermConfig::srgb8_to_linear(90);
+                let border_color = [border, border, border, 1.0];
                 push_quad(
                     &mut bg_verts,
                     x0,
@@ -1533,7 +1545,7 @@ impl Renderer {
                     y0 + hair,
                     w as f32,
                     h as f32,
-                    [0.4, 0.4, 0.4, 1.0],
+                    border_color,
                 );
                 push_quad(
                     &mut bg_verts,
@@ -1543,7 +1555,7 @@ impl Renderer {
                     y0 + panel_h,
                     w as f32,
                     h as f32,
-                    [0.4, 0.4, 0.4, 1.0],
+                    border_color,
                 );
                 push_quad(
                     &mut bg_verts,
@@ -1553,7 +1565,7 @@ impl Renderer {
                     y0 + panel_h,
                     w as f32,
                     h as f32,
-                    [0.4, 0.4, 0.4, 1.0],
+                    border_color,
                 );
                 push_quad(
                     &mut bg_verts,
@@ -1563,7 +1575,7 @@ impl Renderer {
                     y0 + panel_h,
                     w as f32,
                     h as f32,
-                    [0.4, 0.4, 0.4, 1.0],
+                    border_color,
                 );
 
                 // Highlight background for selected item
@@ -1574,6 +1586,7 @@ impl Renderer {
                     // Selected item is at: query_bar + gap + selected_idx * (label+desc+gap+gap)
                     let item_y = y0 + pad + query_bar_h + gap_h + selected_idx as f32 * (line_h * 2.2 + gap_h * 2.0);
                     let highlight_h = line_h * 2.2;
+                    let hl_color = crate::config::NeotermConfig::srgb8_to_linear(60);
                     push_quad(
                         &mut bg_verts,
                         x0 + pad,
@@ -1582,7 +1595,7 @@ impl Renderer {
                         item_y + highlight_h,
                         w as f32,
                         h as f32,
-                        [0.35, 0.35, 0.38, 0.8], // Selected item highlight
+                        [hl_color, hl_color, hl_color, 0.8],
                     );
                 }
 
