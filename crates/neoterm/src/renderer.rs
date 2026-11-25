@@ -696,52 +696,99 @@ impl Renderer {
                     None => Family::Monospace,
                 };
                 let base = Attrs::new().family(family).color(self.tab_active_fg);
-                let bold_attrs = Attrs::new()
+
+                // Ghostty-style: centered panel with query bar, command items
+                // showing label + keybinds + description, and highlighted selection.
+
+                // Phase 1: Build all text lines into owned storage.
+                let mut str_storage: Vec<String> = Vec::new();
+                // Each entry: (text_index_into_storage, attrs)
+                let mut line_defs: Vec<(usize, Attrs)> = Vec::new();
+
+                // Query bar at top: " > query" or just " > "
+                let query_text = format!(" > {}", palette.query);
+                str_storage.push(query_text);
+                let query_attrs = Attrs::new()
                     .family(family)
                     .color(Color::rgb(255, 255, 255))
                     .weight(Weight::BOLD);
-                let accent_attrs = Attrs::new()
-                    .family(family)
-                    .color(self.tab_active_fg)
-                    .weight(Weight::BOLD);
-                let dim_attrs = Attrs::new()
-                    .family(family)
-                    .color(Color::rgb(150, 150, 150));
-                
-                // Build palette text: query on first line, then filtered commands
-                let query_text = format!("> {}", palette.query);
-                let mut lines = vec![query_text];
-                for cmd in palette.visible_commands() {
-                    let marker = if palette.filtered[palette.selected] == palette.commands.iter().position(|c| c.id == cmd.id).unwrap() {
-                        "▸ "
+                line_defs.push((str_storage.len() - 1, query_attrs));
+
+                // Add a separator gap line
+                str_storage.push(String::new());
+                line_defs.push((str_storage.len() - 1, base.clone()));
+
+                let selected_idx = palette.selected.min(palette.filtered.len().saturating_sub(1));
+                let total_filtered = palette.filtered.len();
+
+                for (list_pos, &cmd_idx) in palette.filtered.iter().enumerate() {
+                    let cmd = &palette.commands[cmd_idx];
+                    let is_selected = list_pos == selected_idx;
+
+                    // Label + keybinds on one line
+                    let label_text = if is_selected {
+                        format!("▸ {}", cmd.label)
                     } else {
-                        "  "
+                        format!("  {}", cmd.label)
                     };
-                    lines.push(format!("{}{}", marker, cmd.label));
-                    lines.push(format!("{}  {}", " ".repeat(marker.len()), cmd.description));
-                }
-                let palette_text = lines.join("\n");
-                
-                // We'll use a simpler approach: just render the whole thing with basic styling
-                let mut spans = Vec::new();
-                let mut char_pos = 0;
-                for (line_idx, line) in lines.iter().enumerate() {
-                    let line_len = line.chars().count();
-                    if line_idx == 0 {
-                        // Query line: bold
-                        spans.push((line.as_str(), bold_attrs.clone()));
-                    } else if line_idx % 2 == 1 {
-                        // Command label line
-                        let is_selected = (line_idx - 1) / 2 == palette.selected.min(palette.filtered.len().saturating_sub(1));
-                        let attrs = if is_selected { accent_attrs.clone() } else { base.clone() };
-                        spans.push((line.as_str(), attrs));
+                    let label_attrs = if is_selected {
+                        Attrs::new()
+                            .family(family)
+                            .color(Color::rgb(255, 255, 255))
+                            .weight(Weight::BOLD)
                     } else {
-                        // Description line: dim
-                        spans.push((line.as_str(), dim_attrs.clone()));
+                        Attrs::new().family(family).color(self.tab_active_fg)
+                    };
+
+                    // Keybinds (right side of same line)
+                    if !cmd.keybinds.is_empty() {
+                        let kb_attrs = if is_selected {
+                            Attrs::new()
+                                .family(family)
+                                .color(Color::rgb(180, 180, 180))
+                                .weight(Weight::NORMAL)
+                        } else {
+                            Attrs::new()
+                                .family(family)
+                                .color(Color::rgb(120, 120, 120))
+                                .weight(Weight::NORMAL)
+                        };
+                        // Right-align keybinds: pad the label line
+                        let padded_label = format!("{:>70.70}  {}", label_text, cmd.keybinds);
+                        str_storage.push(padded_label);
+                        line_defs.push((str_storage.len() - 1, kb_attrs));
+                    } else {
+                        str_storage.push(label_text);
+                        line_defs.push((str_storage.len() - 1, label_attrs));
                     }
-                    char_pos += line_len + 1; // +1 for newline
+
+                    // Description line below
+                    let desc_attrs = if is_selected {
+                        Attrs::new()
+                            .family(family)
+                            .color(Color::rgb(200, 200, 200))
+                            .weight(Weight::NORMAL)
+                    } else {
+                        Attrs::new().family(family).color(Color::rgb(140, 140, 140))
+                    };
+                    let desc_indent = if is_selected { "    ▸ " } else { "      " };
+                    let desc_text = format!("{}{}", desc_indent, cmd.description);
+                    str_storage.push(desc_text);
+                    line_defs.push((str_storage.len() - 1, desc_attrs));
+
+                    // Gap between items
+                    if list_pos < total_filtered - 1 {
+                        str_storage.push(String::new());
+                        line_defs.push((str_storage.len() - 1, base.clone()));
+                    }
                 }
-                
+
+                // Phase 2: Build spans from storage (no more mutations to str_storage).
+                let mut spans: Vec<(&str, Attrs)> = Vec::with_capacity(line_defs.len());
+                for (idx, attrs) in line_defs {
+                    spans.push((str_storage[idx].as_str(), attrs));
+                }
+
                 self.palette_buffer.set_rich_text(spans, &base, Shaping::Advanced, None);
                 self.palette_buffer.shape_until_scroll(&mut self.font_system, false);
             }
@@ -1445,27 +1492,111 @@ impl Renderer {
             });
         }
         
-        // Command palette overlay: centered in window
+        // Command palette overlay: centered Ghostty-style panel
         if let Some(palette) = palette {
             if palette.visible {
-                // Draw a semi-transparent background for the palette
                 let cell = self.advance() * scale;
-                let palette_w = 60.0 * cell;
-                let palette_h = 30.0 * cell; // approximate height
+                let line_h = self.font_size * 1.3 * scale;
                 let pad = 16.0 * scale;
-                let x0 = (w as f32 - palette_w) / 2.0;
-                let y0 = (h as f32 - palette_h) / 2.0;
-                
+
+                // Calculate panel dimensions based on filtered commands
+                let selected_idx = palette.selected.min(palette.filtered.len().saturating_sub(1));
+                let item_count = palette.filtered.len();
+                // Each command takes: query bar(1) + gap(1) + label(1) + keybind(1) + desc(1) + gap(1) = ~6 lines
+                // But we want it compact like Ghostty
+                let lines_per_item = 4; // label+keybind, desc, gap, gap
+                let content_lines = 1 + item_count * lines_per_item; // query bar + items
+                let panel_w = 70.0 * cell;
+                let panel_h = (content_lines as f32 * line_h * 1.1) + pad * 2.0;
+                let x0 = (w as f32 - panel_w) / 2.0;
+                let y0 = (h as f32 - panel_h) / 2.0;
+
+                // Semi-transparent background panel with rounded corners (simulated with quads)
+                let hair = scale.max(1.0);
+                // Main panel background
+                push_quad(
+                    &mut bg_verts,
+                    x0,
+                    y0,
+                    x0 + panel_w,
+                    y0 + panel_h,
+                    w as f32,
+                    h as f32,
+                    [0.15, 0.15, 0.17, 0.95], // Dark semi-transparent panel
+                );
+                // Border
+                push_quad(
+                    &mut bg_verts,
+                    x0,
+                    y0,
+                    x0 + panel_w,
+                    y0 + hair,
+                    w as f32,
+                    h as f32,
+                    [0.4, 0.4, 0.4, 1.0],
+                );
+                push_quad(
+                    &mut bg_verts,
+                    x0,
+                    y0 + panel_h - hair,
+                    x0 + panel_w,
+                    y0 + panel_h,
+                    w as f32,
+                    h as f32,
+                    [0.4, 0.4, 0.4, 1.0],
+                );
+                push_quad(
+                    &mut bg_verts,
+                    x0,
+                    y0,
+                    x0 + hair,
+                    y0 + panel_h,
+                    w as f32,
+                    h as f32,
+                    [0.4, 0.4, 0.4, 1.0],
+                );
+                push_quad(
+                    &mut bg_verts,
+                    x0 + panel_w - hair,
+                    y0,
+                    x0 + panel_w,
+                    y0 + panel_h,
+                    w as f32,
+                    h as f32,
+                    [0.4, 0.4, 0.4, 1.0],
+                );
+
+                // Highlight background for selected item
+                if item_count > 0 {
+                    let item_h = line_h * 1.1;
+                    let query_bar_h = line_h * 1.1;
+                    let gap_h = line_h * 0.3;
+                    // Selected item is at: query_bar + gap + selected_idx * (label+desc+gap+gap)
+                    let item_y = y0 + pad + query_bar_h + gap_h + selected_idx as f32 * (line_h * 2.2 + gap_h * 2.0);
+                    let highlight_h = line_h * 2.2;
+                    push_quad(
+                        &mut bg_verts,
+                        x0 + pad,
+                        item_y,
+                        x0 + panel_w - pad,
+                        item_y + highlight_h,
+                        w as f32,
+                        h as f32,
+                        [0.35, 0.35, 0.38, 0.8], // Selected item highlight
+                    );
+                }
+
+                // Text area for palette content
                 areas.push(TextArea {
                     buffer: &self.palette_buffer,
-                    left: x0 + pad,
+                    left: x0 + pad * 1.5,
                     top: y0 + pad,
                     scale,
                     bounds: TextBounds {
-                        left: x0 as i32,
-                        top: y0 as i32,
-                        right: (x0 + palette_w) as i32,
-                        bottom: (y0 + palette_h) as i32,
+                        left: (x0 + pad * 1.5) as i32,
+                        top: (y0 + pad) as i32,
+                        right: (x0 + panel_w - pad * 1.5) as i32,
+                        bottom: (y0 + panel_h - pad) as i32,
                     },
                     default_color: self.tab_active_fg,
                     custom_glyphs: &[],
