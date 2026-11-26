@@ -4,6 +4,12 @@ version = "0.4.0"
 edition = "2021"
 description = "NeoTerm v0.4 - GPU terminal with tabs + themes (pure Rust)"
 license = "MIT"
+authors = ["FMB237 <miguelfouenanf@gmail.com>"]
+repository = "https://github.com/FMB237/Neoterm"
+homepage = "https://github.com/FMB237/Neoterm"
+documentation = "https://github.com/FMB237/Neoterm"
+keywords = ["terminal", "gpu", "tabs", "themes", "rust"]
+categories = ["command-line-utilities", "gui"]
 
 [[bin]]
 name = "neoterm"
@@ -32,3 +38,31 @@ serde_json = "1.0.154"
 chrono = "0.4"
 percent-encoding = "2.3"
 
+# cargo-deb metadata
+[package.metadata.deb]
+maintainer = "FMB237 <miguelfouenanf@gmail.com>"
+copyright = "2026 FMB237 <miguelfouenanf@gmail.com>"
+license = "MIT"
+section = "utils"
+priority = "optional"
+depends = "libvulkan1, libx11-6, libxkbcommon0, libwayland-client0, libasound2"
+description = """\
+NeoTerm - GPU-accelerated terminal emulator with tabs, splits, and themes.
+Features:
+- Hardware-accelerated rendering via wgpu
+- Tabs and splits with 1-cell dividers
+- Search with floating pill overlay
+- Command palette (Ctrl+Shift+P)
+- Session management (save/load/list)
+- Shell integration (OSC 7/133/633)
+- Vi-style copy mode
+- Performance HUD
+- Lazy pane rendering
+"""
+
+# cargo-wix metadata for Windows MSI
+[package.metadata.wix]
+manufacturer = "FMB237"
+upgrade-code = "12345678-1234-1234-1234-123456789abc"
+license-rtf = "LICENSE.rtf"
+icon-path = "assets/neoterm.ico"

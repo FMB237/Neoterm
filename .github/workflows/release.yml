@@ -20,14 +20,21 @@ jobs:
         with:
           toolchain: stable
 
+      - name: Install cargo-deb
+        run: cargo install cargo-deb
+
       - name: Build release
         run: cargo build --release
+
+      - name: Build .deb package
+        run: cargo deb --no-build --target-dir target/release
 
       - name: Create checksums
         run: |
           cd target/release
           sha256sum neoterm neoterm.exe 2>/dev/null | tee checksums.txt
           sha256sum neoterm > neoterm.sha256
+          sha256sum *.deb 2>/dev/null >> checksums.txt
 
       - name: Create release archive
         run: |
@@ -45,11 +52,11 @@ jobs:
             target/release/neoterm.sha256
             target/release/neoterm-linux-x86_64.tar.gz
             target/release/neoterm-windows-x86_64.zip
+            target/release/debian/*.deb
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # Also build on Windows and macOS for multi-platform releases
   build-windows:
     name: Build Windows
     runs-on: windows-latest
@@ -61,14 +68,27 @@ jobs:
         with:
           toolchain: stable-x86_64-pc-windows-msvc
 
+      - name: Install cargo-wix
+        run: cargo install cargo-wix
+
       - name: Build release
         run: cargo build --release
+
+      - name: Build Windows installer (MSI)
+        run: cargo wix --no-build --target-dir target/release
 
       - name: Upload Windows binary
         uses: actions/upload-artifact@v4
         with:
           name: neoterm-windows
           path: target/release/neoterm.exe
+          retention-days: 30
+
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: neoterm-windows-installer
+          path: target/wix/*.msi
           retention-days: 30
 
   build-macos:

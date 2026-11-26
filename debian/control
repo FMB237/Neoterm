@@ -1,0 +1,19 @@
+Source: neoterm
+Section: utils
+Priority: optional
+Maintainer: FMB237 <miguelfouenanf@gmail.com>
+Build-Depends: debhelper-compat (= 13), cargo, rustc
+Standards-Version: 4.6.2
+Homepage: https://github.com/FMB237/Neoterm
+Vcs-Git: https://github.com/FMB237/Neoterm
+Vcs-Browser: https://github.com/FMB237/Neoterm
+
+Package: neoterm
+Architecture: amd64
+Depends: \${shlibs:Depends}, \${misc:Depends}, libvulkan1, libx11-6, libxkbcommon0, libwayland-client0, libasound2
+Description: GPU-accelerated terminal emulator with tabs and themes
+ NeoTerm is a modern GPU-accelerated terminal emulator written in pure Rust.
+ It features hardware-accelerated rendering via wgpu, tabs and splits with
+ 1-cell dividers, search with floating pill overlay, command palette,
+ session management, shell integration, Vi-style copy mode, performance HUD,
+ and lazy pane rendering.
