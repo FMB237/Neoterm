@@ -1,0 +1,93 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Build release
+        run: cargo build --release
+
+      - name: Create checksums
+        run: |
+          cd target/release
+          sha256sum neoterm neoterm.exe 2>/dev/null | tee checksums.txt
+          sha256sum neoterm > neoterm.sha256
+
+      - name: Create release archive
+        run: |
+          cd target/release
+          tar -czf neoterm-linux-x86_64.tar.gz neoterm 2>/dev/null || true
+          zip neoterm-windows-x86_64.zip neoterm.exe 2>/dev/null || true
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            target/release/neoterm
+            target/release/neoterm.exe
+            target/release/checksums.txt
+            target/release/neoterm.sha256
+            target/release/neoterm-linux-x86_64.tar.gz
+            target/release/neoterm-windows-x86_64.zip
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Also build on Windows and macOS for multi-platform releases
+  build-windows:
+    name: Build Windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (MSVC)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable-x86_64-pc-windows-msvc
+
+      - name: Build release
+        run: cargo build --release
+
+      - name: Upload Windows binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: neoterm-windows
+          path: target/release/neoterm.exe
+          retention-days: 30
+
+  build-macos:
+    name: Build macOS
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Build release
+        run: cargo build --release
+
+      - name: Upload macOS binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: neoterm-macos
+          path: target/release/neoterm
+          retention-days: 30
