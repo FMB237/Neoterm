@@ -637,7 +637,8 @@ impl App {
                         ws.window.request_redraw();
                         return;
                     }
-                    ws.tabs.select(i);
+                    // Start tab drag (reorder on hover in on_cursor_moved)
+                    ws.tab_drag = Some(i);
                     ws.force_draw = true;
                     ws.window.request_redraw();
                     return;
@@ -732,7 +733,19 @@ impl App {
         ws.left_held = false;
         
         // Tab drag drop
-        if let Some(_src) = ws.tab_drag.take() {
+        if let Some(src) = ws.tab_drag.take() {
+            // If we didn't move to a different tab during drag, just select this one
+            if let Some(dst) = self.hovered_tab(ws) {
+                if src != dst {
+                    // Already reordered by on_cursor_moved
+                } else {
+                    // No drag movement - just select the tab
+                    ws.tabs.select(src);
+                }
+            } else {
+                // No hover - select the tab
+                ws.tabs.select(src);
+            }
             ws.force_draw = true;
             ws.window.request_redraw();
             return;
