@@ -1233,16 +1233,9 @@ impl App {
             let current = if s.matches().is_empty() { 0 } else { s.current_index() + 1 };
             (s.query.as_str(), s.matches().len(), current)
         });
-        // HUD stats: include dirty pane count from this frame and atlas usage.
+// HUD stats are updated in the event loop with real frame deltas.
+        // Draw just passes the current stats to the renderer.
         let hud = if ws.hud_visible {
-            let dirty_count = if pty_dirty {
-                t.active().map(|tab| tab.layout().panes.len()).unwrap_or(0)
-            } else {
-                0
-            };
-            if let Some(stats) = ws.hud_stats.as_mut() {
-                stats.update(Duration::ZERO, dirty_count, 0.0);
-            }
             ws.hud_stats.as_ref()
         } else {
             None
@@ -1592,7 +1585,12 @@ impl App {
             PaletteAction::SessionList => self.handle_session_list(ws),
             // Performance HUD
             PaletteAction::TogglePerformanceHud => {
-                log::info!("Performance HUD toggle not yet implemented");
+                ws.hud_visible = !ws.hud_visible;
+                log::info!(
+                    "performance HUD: {}",
+                    if ws.hud_visible { "on" } else { "off" }
+                );
+                ws.window.request_redraw();
             }
             // All other actions map to InputAction
             _ => {
@@ -2446,6 +2444,14 @@ impl App {
             InputAction::CopymodeCopy => self.copymode_copy(ws),
             InputAction::CopymodeExit => self.copymode_exit(ws),
             InputAction::PaletteToggle => self.toggle_palette(ws),
+            InputAction::TogglePerformanceHud => {
+                ws.hud_visible = !ws.hud_visible;
+                log::info!(
+                    "performance HUD: {}",
+                    if ws.hud_visible { "on" } else { "off" }
+                );
+                ws.window.request_redraw();
+            }
             InputAction::Ignored => {}
         }
     }

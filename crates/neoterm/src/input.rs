@@ -50,6 +50,8 @@ pub enum InputAction {
     CopymodeToggle,
     /// Toggle command palette (Ctrl+Shift+P).
     PaletteToggle,
+    /// Toggle performance HUD overlay (Ctrl+Shift+Alt+F).
+    TogglePerformanceHud,
     /// Copymode navigation (only active in copymode).
     CopymodeUp,
     CopymodeDown,
@@ -241,6 +243,17 @@ fn map_key_parts(
 pub fn chrome_action(key: &Key, mods: ModifiersState) -> Option<InputAction> {
     let ctrl = mods.control_key();
     let shift = mods.shift_key();
+
+    // Ctrl+Shift+Alt+F toggles the performance HUD.
+    if ctrl && shift && mods.alt_key() {
+        match key {
+            Key::Character(s) => match s.to_uppercase().as_str() {
+                "F" => return Some(InputAction::TogglePerformanceHud),
+                _ => {}
+            },
+            _ => {}
+        }
+    }
 
     if ctrl && shift {
         match key {
@@ -494,5 +507,35 @@ mod tests {
             false,
         );
         assert!(matches!(in_app, InputAction::PtyInput(_)));
+    }
+
+    /// Ctrl+Shift+Alt+F toggles the performance HUD.
+    #[test]
+    fn hud_toggle_shortcut_maps() {
+        let ctrl_shift_alt = ModifiersState::CONTROL | ModifiersState::SHIFT | ModifiersState::ALT;
+        assert!(matches!(
+            press("f", ctrl_shift_alt),
+            Some(InputAction::TogglePerformanceHud)
+        ));
+        assert!(matches!(
+            press("F", ctrl_shift_alt),
+            Some(InputAction::TogglePerformanceHud)
+        ));
+    }
+
+    /// Ctrl+Shift+F (no Alt) still opens search, not the HUD.
+    #[test]
+    fn hud_needs_alt_modifier() {
+        assert!(matches!(
+            press("f", ctrl_shift()),
+            Some(InputAction::SearchToggle)
+        ));
+        assert!(!matches!(
+            press("f", ctrl_shift()),
+            Some(InputAction::TogglePerformanceHud)
+        ));
+        // Ctrl+Alt+F without shift is not a chrome shortcut.
+        let ctrl_alt = ModifiersState::CONTROL | ModifiersState::ALT;
+        assert!(press("f", ctrl_alt).is_none());
     }
 }
