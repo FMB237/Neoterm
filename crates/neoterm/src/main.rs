@@ -20,7 +20,9 @@ use alacritty_terminal::index::{Column, Line, Point, Side};
 use alacritty_terminal::selection::SelectionType;
 use alacritty_terminal::term::TermMode;
 use anyhow::{Context, Result};
-use arboard::{Clipboard, GetExtLinux, LinuxClipboardKind, SetExtLinux};
+use arboard::{Clipboard, GetExtLinux, SetExtLinux};
+#[cfg(target_os = "linux")]
+use arboard::LinuxClipboardKind;
 use clap::{Parser, Subcommand};
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalPosition;
