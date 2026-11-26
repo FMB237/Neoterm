@@ -28,7 +28,7 @@ multiple-versions = "warn"
 # Lint level for crates that use wildcard dependencies.
 wildcards = "deny"
 # Lint level for dependencies that specify version requirements with no upper bound.
-#unbounded = "warn"
+unbounded = "warn"
 # Deny specific crates by name.
 # deny = []
 # Deny specific versions of crates.
@@ -37,10 +37,10 @@ wildcards = "deny"
 # allow = []
 # Highlight crates that are not in the deny list but might be of interest.
 highlight = [
-    { name = "yansi" },
-    { name = "atty" },
-    { name = "which" },
-    { name = "dirs" },
+    { name = "yansi", reason = "Used for colored output in tests" },
+    { name = "atty", reason = "Terminal detection for tests" },
+    { name = "which", reason = "Used in tests for command lookup" },
+    { name = "dirs", reason = "Directory resolution for config" },
 ]
 
 [sources]
@@ -48,7 +48,3 @@ highlight = [
 unknown-git = "allow"
 # Unknown registry sources are allowed by default. Set to "deny" to disallow.
 unknown-registry = "allow"
-
-[unbounded]
-# Lint level for dependencies that specify version requirements with no upper bound.
-level = "warn"
