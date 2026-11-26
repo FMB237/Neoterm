@@ -1,3 +1,7 @@
+/// Default number of command rows shown in the palette before it scrolls.
+/// The renderer lowers this on short windows.
+const DEFAULT_VISIBLE_ROWS: usize = 8;
+
 /// A single command in the palette.
 #[derive(Clone, Debug)]
 pub struct PaletteCommand {
@@ -82,6 +86,10 @@ pub struct PaletteState {
     pub commands: Vec<PaletteCommand>,
     pub filtered: Vec<usize>, // indices into commands
     pub selected: usize,
+    /// First visible row in `filtered` (scrolling window).
+    pub scroll: usize,
+    /// Number of command rows the renderer can fit on screen.
+    pub visible_rows: usize,
     pub visible: bool,
 }
 
@@ -94,6 +102,8 @@ impl PaletteState {
             commands,
             filtered,
             selected: 0,
+            scroll: 0,
+            visible_rows: DEFAULT_VISIBLE_ROWS,
             visible: false,
         }
     }
@@ -333,6 +343,10 @@ impl PaletteState {
         self.visible = !self.visible;
         if self.visible {
             self.query.clear();
+            // A fresh open always starts at the top, not at whatever was
+            // selected the last time the palette was shown.
+            self.selected = 0;
+            self.scroll = 0;
             self.filter();
         }
     }
@@ -356,13 +370,43 @@ impl PaletteState {
     pub fn select_next(&mut self) {
         if !self.filtered.is_empty() {
             self.selected = (self.selected + 1) % self.filtered.len();
+            self.ensure_selected_visible();
         }
     }
 
     pub fn select_prev(&mut self) {
         if !self.filtered.is_empty() {
             self.selected = (self.selected + self.filtered.len() - 1) % self.filtered.len();
+            self.ensure_selected_visible();
         }
+    }
+
+    /// Set how many command rows fit on screen and scroll the selection
+    /// back into view. Called by the renderer once it knows the panel size.
+    pub fn set_visible_rows(&mut self, rows: usize) {
+        self.visible_rows = rows.max(1);
+        self.ensure_selected_visible();
+    }
+
+    /// Scroll the window so the selected command is on screen.
+    fn ensure_selected_visible(&mut self) {
+        if self.filtered.is_empty() {
+            self.scroll = 0;
+            return;
+        }
+        if self.selected < self.scroll {
+            self.scroll = self.selected;
+        } else if self.selected >= self.scroll + self.visible_rows {
+            self.scroll = self.selected + 1 - self.visible_rows;
+        }
+        let max_scroll = self.filtered.len().saturating_sub(self.visible_rows);
+        self.scroll = self.scroll.min(max_scroll);
+    }
+
+    /// The slice of `filtered` currently visible in the panel.
+    pub fn visible_range(&self) -> std::ops::Range<usize> {
+        let end = (self.scroll + self.visible_rows).min(self.filtered.len());
+        self.scroll.min(end)..end
     }
 
     pub fn execute_selected(&self) -> Option<PaletteAction> {
@@ -389,6 +433,10 @@ impl PaletteState {
         if self.selected >= self.filtered.len() {
             self.selected = self.filtered.len().saturating_sub(1);
         }
+        // A narrower filter always starts its window at the top, then pulls
+        // the selection back into view if it survived the filter.
+        self.scroll = 0;
+        self.ensure_selected_visible();
     }
 
     pub fn get_selected_command(&self) -> Option<&PaletteCommand> {
@@ -462,6 +510,69 @@ mod tests {
         state.selected = 0;
         let action = state.execute_selected();
         assert!(action.is_some());
+    }
+
+    #[test]
+    fn palette_scrolls_to_keep_selection_visible() {
+        let mut state = PaletteState::new();
+        state.set_visible_rows(5);
+        state.filter();
+        assert!(state.filtered.len() > 5, "need a list longer than the window");
+
+        for _ in 0..7 {
+            state.select_next();
+        }
+        assert_eq!(state.selected, 7);
+        assert_eq!(state.visible_range(), 3..8);
+        assert_eq!(state.scroll, 3);
+    }
+
+    #[test]
+    fn palette_scrolls_back_up_with_previous() {
+        let mut state = PaletteState::new();
+        state.set_visible_rows(4);
+        state.filter();
+        for _ in 0..6 {
+            state.select_next();
+        }
+        assert_eq!(state.scroll, 3);
+        for _ in 0..4 {
+            state.select_prev();
+        }
+        assert_eq!(state.selected, 2);
+        assert_eq!(state.scroll, 2);
+        assert_eq!(state.visible_range(), 2..6);
+    }
+
+    #[test]
+    fn palette_opens_at_the_top_again() {
+        let mut state = PaletteState::new();
+        state.set_visible_rows(5);
+        state.filter();
+        for _ in 0..6 {
+            state.select_next();
+        }
+        state.close();
+        state.toggle();
+        assert_eq!(state.selected, 0);
+        assert_eq!(state.scroll, 0);
+    }
+
+    #[test]
+    fn palette_filter_pulls_selection_into_view() {
+        let mut state = PaletteState::new();
+        state.set_visible_rows(3);
+        state.filter();
+        for _ in 0..5 {
+            state.select_next();
+        }
+        assert_eq!(state.scroll, 3);
+        // Typing a filter that keeps the selection but shrinks the list must
+        // not leave the highlight below the visible window.
+        state.type_char('t');
+        assert!(state.selected < state.filtered.len());
+        let range = state.visible_range();
+        assert!(range.contains(&state.selected), "{range:?} vs {}", state.selected);
     }
 
     #[test]

@@ -1257,7 +1257,7 @@ impl App {
             scroll,
             strip,
             search_bar,
-            ws.palette.as_ref(),
+            ws.palette.as_mut(),
             hud,
         );
         ws.last_titles = titles;

@@ -79,6 +79,32 @@ struct SelVertex {
     col: [f32; 4],
 }
 
+/// Most command rows the palette will ever show, however tall the window is.
+/// Beyond this the list scrolls instead of turning into a full-screen wall.
+const PALETTE_MAX_ROWS: usize = 10;
+
+/// Panel geometry for the command palette, computed once per frame so the
+/// background quads and the shaped text agree. `capacity` is how many command
+/// rows fit on this window; `drawn` is how many are actually shown (fewer when
+/// the filter has fewer matches).
+struct PaletteLayout {
+    /// Panel rect in physical pixels: (x0, y0, x1, y1).
+    panel: (f32, f32, f32, f32),
+    pad: f32,
+    line_h: f32,
+    capacity: usize,
+    drawn: usize,
+}
+
+impl PaletteLayout {
+    /// Top edge of the label line for the `rel`-th visible row.
+    fn item_top(&self, rel: usize) -> f32 {
+        // Line 0 is the query, line 1 the separator; each item is
+        // label + description + blank gap.
+        self.panel.1 + self.pad + (2 + 3 * rel) as f32 * self.line_h
+    }
+}
+
 const SEL_SHADER: &str = r#"
 struct Vin {
     @location(0) pos: vec2<f32>,
@@ -243,7 +269,9 @@ impl Renderer {
         let mut palette_buffer = Buffer::new(&mut font_system, Metrics::new(font_size, line_height));
         let hud_buffer = Buffer::new(&mut font_system, Metrics::new(font_size, line_height));
         tab_buffer.set_size(Some(2000.0), Some(40.0));
-        palette_buffer.set_size(Some(800.0), Some(600.0));
+        // The palette breaks its own lines, so it must never wrap: a fixed
+        // buffer width would re-wrap labels on narrow panels or large fonts.
+        palette_buffer.set_size(None, None);
 
         // Solid-rect pipeline for selection backgrounds.
         let sel_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -417,6 +445,12 @@ impl Renderer {
             }
         }
         self.tab_buffer.set_metrics(Metrics::new(size, size * 1.3));
+        // Overlays use the same metrics as the body, or they keep the font
+        // size they were built with after a zoom.
+        self.toast_buffer.set_metrics(m);
+        self.search_buffer.set_metrics(m);
+        self.palette_buffer.set_metrics(m);
+        self.hud_buffer.set_metrics(m);
         self.last_tab_text.clear();
         self.pane_rows.clear();
         self.measured_advance = self.probe_advance();
@@ -535,10 +569,41 @@ impl Renderer {
         )
     }
 
+    /// Command-palette panel geometry. The panel is sized to the window and
+    /// capped at [`PALETTE_MAX_ROWS`]: the old code sized it from the number
+    /// of matches, so 32 commands asked for a panel taller than the screen
+    /// and most of the list was clipped away.
+    fn palette_layout(&self, w: f32, h: f32, scale: f32, matches: usize) -> PaletteLayout {
+        let cell = self.advance() * scale;
+        let line_h = self.font_size * LINE_HEIGHT * scale;
+        let pad = 14.0 * scale;
+
+        let margin = 24.0 * scale;
+        let max_h = (h - margin * 2.0).max(line_h * 10.0);
+        let max_w = (w - margin * 2.0).max(cell * 24.0);
+        let panel_w = (45.0 * cell).max(150.0).min(max_w);
+
+        // Line 0 is the query, line 1 the separator, then label +
+        // description + gap for each row.
+        let max_lines = (((max_h - pad * 2.0) / line_h).floor() as usize).max(4);
+        let capacity = ((max_lines - 1) / 3).clamp(1, PALETTE_MAX_ROWS);
+        let drawn = capacity.min(matches.max(1));
+        let panel_h = pad * 2.0 + (3 * drawn + 1) as f32 * line_h;
+        let x0 = (w - panel_w) / 2.0;
+        let y0 = ((h - panel_h) / 2.0).max(margin * 0.5);
+
+        PaletteLayout {
+            panel: (x0, y0, x0 + panel_w, y0 + panel_h),
+            pad,
+            line_h,
+            capacity,
+            drawn,
+        }
+    }
+
     /// Build a cosmic-text attrs list for one row: default fg + per-span
     /// overrides (color, bold, italic, underline) in the configured family.
-    fn row_attrs(defaults: &Attrs, family: Family<'_>, row: &RowContent) -> AttrsList {
-        let mut list = AttrsList::new(defaults);
+    fn row_attrs(defaults: &Attrs, family: Family<'_>, row: &RowContent) -> AttrsList {        let mut list = AttrsList::new(defaults);
         for (range, style) in &row.spans {
             let (r, g, b) = style.fg;
             let mut attrs = Attrs::new().family(family).color(Color::rgb(r, g, b));
@@ -570,7 +635,7 @@ impl Renderer {
         scroll: ScrollState,
         strip: bool,
         search: Option<(&str, usize, usize)>, // (query, match_count, current_match_1based)
-        palette: Option<&crate::palette::PaletteState>,
+        mut palette: Option<&mut crate::palette::PaletteState>,
         hud: Option<&crate::HudStats>,
     ) {
         let scale = self.window.scale_factor() as f32;
@@ -688,118 +753,124 @@ impl Renderer {
             self.last_hover = hover;
         }
         
-        // Palette: shape query + filtered commands when palette is active
-        if let Some(palette) = palette {
+        // Palette: shape query + the visible window of commands when the
+        // palette is active. The panel size is computed first so the text and
+        // the background quads below use the same geometry.
+        let mut palette_layout: Option<PaletteLayout> = None;
+        if let Some(p) = palette.as_deref_mut() {
+            if p.visible {
+                let layout = self.palette_layout(w as f32, h as f32, scale, p.filtered.len());
+                p.set_visible_rows(layout.capacity);
+                palette_layout = Some(layout);
+            }
+        }
+
+        if let (Some(palette), Some(layout)) = (palette.as_deref(), palette_layout.as_ref()) {
             if palette.visible {
                 let family = match self.font_family.as_deref() {
                     Some(name) => Family::Name(name),
                     None => Family::Monospace,
                 };
                 let base = Attrs::new().family(family).color(self.tab_active_fg);
+                let cell = self.advance() * scale;
+                let inner_cols =
+                    (((layout.panel.2 - layout.panel.0) - layout.pad * 2.0) / cell).floor().max(10.0)
+                        as usize;
 
-                // Ghostty-style: centered panel with query bar, command items
-                // showing label + keybinds + description, and highlighted selection.
-
-                // Phase 1: Build all text lines into owned storage.
-                let mut str_storage: Vec<String> = Vec::new();
-                // Each entry: (text_index_into_storage, attrs)
-                let mut line_defs: Vec<(usize, Attrs)> = Vec::new();
-
-                // Query bar at top: " > query" or just " > "
-                let query_text = format!(" > {}", palette.query);
-                str_storage.push(query_text);
                 let query_attrs = Attrs::new()
                     .family(family)
                     .color(Color::rgb(255, 255, 255))
                     .weight(Weight::BOLD);
-                line_defs.push((str_storage.len() - 1, query_attrs));
+                let selected_attrs = Attrs::new()
+                    .family(family)
+                    .color(Color::rgb(255, 255, 255))
+                    .weight(Weight::BOLD);
+                let desc_attrs = Attrs::new().family(family).color(Color::rgb(140, 140, 140));
 
-                // Add a separator gap line
-                str_storage.push(String::new());
-                line_defs.push((str_storage.len() - 1, base.clone()));
+                let total = palette.filtered.len();
+                let mut lines: Vec<(String, Attrs)> = Vec::new();
 
-                let selected_idx = palette.selected.min(palette.filtered.len().saturating_sub(1));
-                let total_filtered = palette.filtered.len();
+                // Query bar: " > query" with a right-aligned "selected/total"
+                // counter, which doubles as the scroll position indicator.
+                let counter = if total == 0 {
+                    String::new()
+                } else {
+                    format!("{}/{}", palette.selected.min(total - 1) + 1, total)
+                };
+                let query_line = format!(" > {}", palette.query);
+                let spaces = inner_cols
+                    .saturating_sub(query_line.chars().count() + counter.chars().count())
+                    .max(1);
+                lines.push((
+                    format!("{}{}{}", query_line, " ".repeat(spaces), counter),
+                    query_attrs,
+                ));
+                lines.push((String::new(), base.clone()));
 
-                for (list_pos, &cmd_idx) in palette.filtered.iter().enumerate() {
-                    let cmd = &palette.commands[cmd_idx];
-                    let is_selected = list_pos == selected_idx;
+                // Only the visible window is shaped: a 30-command list used
+                // to be laid out in full every frame.
+                let visible = palette.visible_range();
+                for list_pos in visible.clone() {
+                    let cmd = &palette.commands[palette.filtered[list_pos]];
+                    let is_selected = list_pos == palette.selected;
 
-                    // Label + keybinds on one line
-                    let label_text = if is_selected {
-                        format!("▸ {}", cmd.label)
+                    let label = format!(
+                        "{}{}",
+                        if is_selected { "▸ " } else { "  " },
+                        cmd.label
+                    );
+                    let label_line = if cmd.keybinds.is_empty() {
+                        label
                     } else {
-                        format!("  {}", cmd.label)
+                        let gap = inner_cols
+                            .saturating_sub(label.chars().count() + cmd.keybinds.chars().count())
+                            .max(2);
+                        format!("{}{}{}", label, " ".repeat(gap), cmd.keybinds)
                     };
-                    let label_attrs = if is_selected {
-                        Attrs::new()
-                            .family(family)
-                            .color(Color::rgb(255, 255, 255))
-                            .weight(Weight::BOLD)
-                    } else {
-                        Attrs::new().family(family).color(self.tab_active_fg)
-                    };
-
-                    // Keybinds (right side of same line)
-                    if !cmd.keybinds.is_empty() {
-                        let kb_attrs = if is_selected {
-                            Attrs::new()
-                                .family(family)
-                                .color(Color::rgb(180, 180, 180))
-                                .weight(Weight::NORMAL)
+                    lines.push((
+                        truncate_chars(&label_line, inner_cols),
+                        if is_selected {
+                            selected_attrs.clone()
                         } else {
-                            Attrs::new()
-                                .family(family)
-                                .color(Color::rgb(120, 120, 120))
-                                .weight(Weight::NORMAL)
-                        };
-                        // Right-align keybinds: pad the label line
-                        let padded_label = format!("{:>35.35}  {}", label_text, cmd.keybinds);
-                        str_storage.push(padded_label);
-                        line_defs.push((str_storage.len() - 1, kb_attrs));
-                    } else {
-                        str_storage.push(label_text);
-                        line_defs.push((str_storage.len() - 1, label_attrs));
-                    }
-
-                    // Description line below
-                    let desc_attrs = if is_selected {
-                        Attrs::new()
-                            .family(family)
-                            .color(Color::rgb(200, 200, 200))
-                            .weight(Weight::NORMAL)
-                    } else {
-                        Attrs::new().family(family).color(Color::rgb(140, 140, 140))
-                    };
-                    let desc_indent = if is_selected { "    ▸ " } else { "      " };
-                    let desc_text = format!("{}{}", desc_indent, cmd.description);
-                    str_storage.push(desc_text);
-                    line_defs.push((str_storage.len() - 1, desc_attrs));
-
-                    // Gap between items
-                    if list_pos < total_filtered - 1 {
-                        str_storage.push(String::new());
-                        line_defs.push((str_storage.len() - 1, base.clone()));
+                            base.clone()
+                        },
+                    ));
+                    lines.push((
+                        truncate_chars(&format!("      {}", cmd.description), inner_cols),
+                        desc_attrs.clone(),
+                    ));
+                    if list_pos + 1 < visible.end {
+                        lines.push((String::new(), base.clone()));
                     }
                 }
 
-                // Show "No results" when nothing matches
-                if total_filtered == 0 && !palette.query.is_empty() {
-                    let no_results_text = "  No results";
-                    str_storage.push(no_results_text.to_string());
-                    let no_results_attrs = Attrs::new()
-                        .family(family)
-                        .color(Color::rgb(140, 140, 140));
-                    line_defs.push((str_storage.len() - 1, no_results_attrs));
+                // "No results" when the filter matches nothing.
+                if total == 0 && !palette.query.is_empty() {
+                    lines.push(("  No results".to_string(), desc_attrs));
                 }
 
-                // Phase 2: Build spans from storage (no more mutations to str_storage).
-                let mut spans: Vec<(&str, Attrs)> = Vec::with_capacity(line_defs.len());
-                for (idx, attrs) in line_defs {
-                    spans.push((str_storage[idx].as_str(), attrs));
+                // One shaped string, one span per line. cosmic-text joins the
+                // span *texts*, so the newline has to live inside a span: a
+                // '\n' pushed between spans is dropped and every row collapses
+                // onto one wrapped line.
+                let mut text = String::new();
+                let mut spans: Vec<(std::ops::Range<usize>, Attrs)> =
+                    Vec::with_capacity(lines.len());
+                let last = lines.len().saturating_sub(1);
+                for (i, (line, attrs)) in lines.iter().enumerate() {
+                    let start = text.len();
+                    text.push_str(line);
+                    if i < last {
+                        text.push('\n');
+                    }
+                    spans.push((start..text.len(), attrs.clone()));
                 }
+                let rich: Vec<(&str, Attrs)> = spans
+                    .iter()
+                    .map(|(range, attrs)| (&text[range.clone()], attrs.clone()))
+                    .collect();
 
-                self.palette_buffer.set_rich_text(spans, &base, Shaping::Advanced, None);
+                self.palette_buffer.set_rich_text(rich, &base, Shaping::Advanced, None);
                 self.palette_buffer.shape_until_scroll(&mut self.font_system, false);
             }
         }
@@ -1258,75 +1329,65 @@ impl Renderer {
         // upload below or they never reach the GPU. The matching TextArea is
         // pushed after the pane rows so the text sits on top.
         let mut palette_rect: Option<(f32, f32, f32, f32)> = None;
-        if let Some(palette) = palette {
-            if palette.visible {
-                let cell = self.advance() * scale;
-                let line_h = self.font_size * 1.3 * scale;
-                let pad = 16.0 * scale;
+        if let Some(layout) = palette_layout.as_ref() {
+            let (x0, y0, x1, y1) = layout.panel;
 
-                let selected_idx = palette.selected.min(palette.filtered.len().saturating_sub(1));
-                let item_count = palette.filtered.len();
-                let content_lines = 1 + item_count * 4;
-                let panel_w = (45.0 * cell).max(150.0);
-                let panel_h = (content_lines as f32 * line_h * 1.1) + pad * 2.0;
-                let x0 = (w as f32 - panel_w) / 2.0;
-                let y0 = (h as f32 - panel_h) / 2.0;
-
-                // Panel background (linearized for the sRGB swapchain)
-                let hair = scale.max(1.0);
-                let panel_bg = crate::config::NeotermConfig::srgb8_to_linear(24);
+            // Panel background (linearized for the sRGB swapchain)
+            let hair = scale.max(1.0);
+            let panel_bg = crate::config::NeotermConfig::srgb8_to_linear(24);
+            push_quad(
+                &mut bg_verts,
+                x0,
+                y0,
+                x1,
+                y1,
+                w as f32,
+                h as f32,
+                [panel_bg, panel_bg, panel_bg * 1.06, 0.95],
+            );
+            // Border
+            let border = crate::config::NeotermConfig::srgb8_to_linear(90);
+            for (rx0, ry0, rx1, ry1) in [
+                (x0, y0, x1, y0 + hair),
+                (x0, y1 - hair, x1, y1),
+                (x0, y0, x0 + hair, y1),
+                (x1 - hair, y0, x1, y1),
+            ] {
                 push_quad(
                     &mut bg_verts,
-                    x0,
-                    y0,
-                    x0 + panel_w,
-                    y0 + panel_h,
+                    rx0,
+                    ry0,
+                    rx1,
+                    ry1,
                     w as f32,
                     h as f32,
-                    [panel_bg, panel_bg, panel_bg * 1.06, 0.95],
+                    [border, border, border, 1.0],
                 );
-                // Border
-                let border = crate::config::NeotermConfig::srgb8_to_linear(90);
-                for (rx0, ry0, rx1, ry1) in [
-                    (x0, y0, x0 + panel_w, y0 + hair),
-                    (x0, y0 + panel_h - hair, x0 + panel_w, y0 + panel_h),
-                    (x0, y0, x0 + hair, y0 + panel_h),
-                    (x0 + panel_w - hair, y0, x0 + panel_w, y0 + panel_h),
-                ] {
-                    push_quad(
-                        &mut bg_verts,
-                        rx0,
-                        ry0,
-                        rx1,
-                        ry1,
-                        w as f32,
-                        h as f32,
-                        [border, border, border, 1.0],
-                    );
-                }
-
-                // Highlight behind the selected item
-                if item_count > 0 {
-                    let query_bar_h = line_h * 1.1;
-                    let gap_h = line_h * 0.3;
-                    let item_y = y0 + pad + query_bar_h + gap_h
-                        + selected_idx as f32 * (line_h * 2.2 + gap_h * 2.0);
-                    let highlight_h = line_h * 2.2;
-                    let hl_color = crate::config::NeotermConfig::srgb8_to_linear(60);
-                    push_quad(
-                        &mut bg_verts,
-                        x0 + pad,
-                        item_y,
-                        x0 + panel_w - pad,
-                        item_y + highlight_h,
-                        w as f32,
-                        h as f32,
-                        [hl_color, hl_color, hl_color, 0.8],
-                    );
-                }
-
-                palette_rect = Some((x0 + pad * 1.5, y0 + pad, x0 + panel_w - pad * 1.5, y0 + panel_h - pad));
             }
+
+            // Highlight behind the selected row (label + description).
+            if let Some(palette) = palette.as_deref() {
+                if !palette.filtered.is_empty() {
+                    let rel = palette.selected.saturating_sub(palette.scroll);
+                    if rel < layout.drawn {
+                        let item_y = layout.item_top(rel);
+                        let highlight_h = layout.line_h * 2.0;
+                        let hl_color = crate::config::NeotermConfig::srgb8_to_linear(60);
+                        push_quad(
+                            &mut bg_verts,
+                            x0 + layout.pad,
+                            item_y,
+                            x1 - layout.pad,
+                            item_y + highlight_h,
+                            w as f32,
+                            h as f32,
+                            [hl_color, hl_color, hl_color, 0.8],
+                        );
+                    }
+                }
+            }
+
+            palette_rect = Some((x0 + layout.pad, y0 + layout.pad, x1 - layout.pad, y1 - layout.pad));
         }
 
         // Upload capped at the preallocated vertex buffer.
@@ -1553,6 +1614,14 @@ impl Renderer {
             ));
 
             let mut spans: Vec<(&str, Attrs)> = Vec::new();
+            // cosmic-text joins span texts, so each row must carry its own
+            // newline or the whole HUD becomes one wrapped line.
+            let last = hud_lines.len().saturating_sub(1);
+            for (i, line) in hud_lines.iter_mut().enumerate() {
+                if i < last {
+                    line.0.push('\n');
+                }
+            }
             for line in hud_lines.iter() {
                 spans.push((line.0.as_str(), line.1.clone()));
             }
@@ -1872,3 +1941,17 @@ fn push_quad(
         });
     }
 }
+
+/// Clamp a palette line to `max` characters, adding an ellipsis when it does
+/// not fit. Counts chars, not bytes, so multi-byte text is never cut through
+/// the middle of a codepoint.
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let keep = max.saturating_sub(1);
+    let mut out: String = s.chars().take(keep).collect();
+    out.push('…');
+    out
+}
+
