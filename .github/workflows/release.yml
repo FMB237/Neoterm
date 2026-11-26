@@ -27,7 +27,7 @@ jobs:
         run: cargo build --release
 
       - name: Build .deb package
-        run: cargo deb --no-build --target-dir target/release
+        run: cargo deb --no-build
 
       - name: Create checksums
         run: |
@@ -75,7 +75,7 @@ jobs:
         run: cargo build --release
 
       - name: Build Windows installer (MSI)
-        run: cargo wix --no-build --target-dir target/release
+        run: cargo wix --no-build
 
       - name: Upload Windows binary
         uses: actions/upload-artifact@v4
