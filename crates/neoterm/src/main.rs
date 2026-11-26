@@ -829,6 +829,7 @@ impl App {
         }
     }
     
+    #[cfg(target_os = "linux")]
     fn on_middle_press(&mut self, ws: &mut WindowState) {
         let Some(pos) = ws.cursor_pos else {
             return;
@@ -895,6 +896,7 @@ impl App {
         self.do_paste_primary(ws);
     }
     
+    #[cfg(target_os = "linux")]
     fn on_middle_release(&mut self, ws: &mut WindowState) {
         if !ws.press_app_middle {
             return;
