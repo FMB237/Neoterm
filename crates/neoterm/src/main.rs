@@ -2002,7 +2002,7 @@ impl App {
             }
         }
         
-        match input::map_key(event, &self.mods, alt) {
+        match input::map_key(event, &self.mods, alt, true) {
             InputAction::CopymodeUp => self.copymode_up(ws),
             InputAction::CopymodeDown => self.copymode_down(ws),
             InputAction::CopymodeLeft => self.copymode_left(ws),
@@ -2319,7 +2319,7 @@ impl App {
             .active()
             .map(|t| t.in_alt_screen())
             .unwrap_or(false);
-        match input::map_key(event, &self.mods, alt) {
+        match input::map_key(event, &self.mods, alt, false) {
             InputAction::PtyInput(bytes) => {
                 if let Some(tab) = ws.tabs.active() {
                     if ws.broadcast {

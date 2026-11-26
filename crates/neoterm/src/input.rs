@@ -85,68 +85,96 @@ pub enum FocusDir {
 /// `alt_screen` routes PageUp/PageDown: apps on the alternate screen
 /// (vim, less) get the key, otherwise we scroll locally — unless Shift is
 /// held, which always scrolls locally.
-pub fn map_key(event: &KeyEvent, mods: &Modifiers, alt_screen: bool) -> InputAction {
+///
+/// `copymode` must be true only while Vi copy mode owns the keyboard. It
+/// changes what `v`/`V`/`y` and the navigation keys mean; with it false they
+/// are ordinary terminal input (this was the bug where typing `v` or `y`
+/// produced nothing).
+pub fn map_key(
+    event: &KeyEvent,
+    mods: &Modifiers,
+    alt_screen: bool,
+    copymode: bool,
+) -> InputAction {
     if event.state != ElementState::Pressed {
         return InputAction::Ignored;
     }
 
+    map_key_parts(
+        &event.logical_key,
+        event.text.as_deref(),
+        mods.state(),
+        alt_screen,
+        copymode,
+    )
+}
+
+/// Pure key mapping, split out of [`map_key`] so it can be tested without
+/// constructing a winit `KeyEvent`.
+fn map_key_parts(
+    key: &Key,
+    text: Option<&str>,
+    mods: ModifiersState,
+    alt_screen: bool,
+    copymode: bool,
+) -> InputAction {
     // Window/app chrome shortcuts first (never reach the PTY).
-    if let Some(action) = chrome_action(&event.logical_key, mods.state()) {
+    if let Some(action) = chrome_action(key, mods) {
         return action;
     }
 
-    let ctrl = mods.state().control_key();
-    let shift = mods.state().shift_key();
+    let ctrl = mods.control_key();
+    let shift = mods.shift_key();
 
     // Special keys.
-    match &event.logical_key {
+    match key {
         Key::Named(NamedKey::Enter) => return InputAction::PtyInput(vec![b'\r']),
         Key::Named(NamedKey::Backspace) => return InputAction::PtyInput(vec![0x7f]),
         Key::Named(NamedKey::Tab) => return InputAction::PtyInput(vec![b'\t']),
         Key::Named(NamedKey::Escape) => return InputAction::PtyInput(vec![0x1b]),
         Key::Named(NamedKey::ArrowUp) => {
-            if !alt_screen {
-                if let Some(action) = copymode_key(&Key::Named(NamedKey::ArrowUp)) {
+            if copymode && !alt_screen {
+                if let Some(action) = copymode_key(key) {
                     return action;
                 }
             }
             return InputAction::PtyInput(b"\x1b[A".to_vec());
         }
         Key::Named(NamedKey::ArrowDown) => {
-            if !alt_screen {
-                if let Some(action) = copymode_key(&Key::Named(NamedKey::ArrowDown)) {
+            if copymode && !alt_screen {
+                if let Some(action) = copymode_key(key) {
                     return action;
                 }
             }
             return InputAction::PtyInput(b"\x1b[B".to_vec());
         }
         Key::Named(NamedKey::ArrowRight) => {
-            if !alt_screen {
-                if let Some(action) = copymode_key(&Key::Named(NamedKey::ArrowRight)) {
+            if copymode && !alt_screen {
+                if let Some(action) = copymode_key(key) {
                     return action;
                 }
             }
             return InputAction::PtyInput(b"\x1b[C".to_vec());
         }
         Key::Named(NamedKey::ArrowLeft) => {
-            if !alt_screen {
-                if let Some(action) = copymode_key(&Key::Named(NamedKey::ArrowLeft)) {
+            if copymode && !alt_screen {
+                if let Some(action) = copymode_key(key) {
                     return action;
                 }
             }
             return InputAction::PtyInput(b"\x1b[D".to_vec());
         }
         Key::Named(NamedKey::Home) => {
-            if !alt_screen {
-                if let Some(action) = copymode_key(&Key::Named(NamedKey::Home)) {
+            if copymode && !alt_screen {
+                if let Some(action) = copymode_key(key) {
                     return action;
                 }
             }
             return InputAction::PtyInput(b"\x1b[H".to_vec());
         }
         Key::Named(NamedKey::End) => {
-            if !alt_screen {
-                if let Some(action) = copymode_key(&Key::Named(NamedKey::End)) {
+            if copymode && !alt_screen {
+                if let Some(action) = copymode_key(key) {
                     return action;
                 }
             }
@@ -156,8 +184,8 @@ pub fn map_key(event: &KeyEvent, mods: &Modifiers, alt_screen: bool) -> InputAct
             if alt_screen && !shift {
                 return InputAction::PtyInput(b"\x1b[5~".to_vec());
             }
-            if !alt_screen {
-                if let Some(action) = copymode_key(&Key::Named(NamedKey::PageUp)) {
+            if copymode && !alt_screen {
+                if let Some(action) = copymode_key(key) {
                     return action;
                 }
             }
@@ -167,16 +195,16 @@ pub fn map_key(event: &KeyEvent, mods: &Modifiers, alt_screen: bool) -> InputAct
             if alt_screen && !shift {
                 return InputAction::PtyInput(b"\x1b[6~".to_vec());
             }
-            if !alt_screen {
-                if let Some(action) = copymode_key(&Key::Named(NamedKey::PageDown)) {
+            if copymode && !alt_screen {
+                if let Some(action) = copymode_key(key) {
                     return action;
                 }
             }
             return InputAction::ScrollPageDown;
         }
         Key::Named(NamedKey::Delete) => return InputAction::PtyInput(b"\x1b[3~".to_vec()),
-        Key::Character(s) if !alt_screen && (s == "v" || s == "V" || s == "y") => {
-            if let Some(action) = copymode_key(&Key::Character(s.clone())) {
+        Key::Character(s) if copymode && !alt_screen && (s == "v" || s == "V" || s == "y") => {
+            if let Some(action) = copymode_key(key) {
                 return action;
             }
         }
@@ -185,7 +213,7 @@ pub fn map_key(event: &KeyEvent, mods: &Modifiers, alt_screen: bool) -> InputAct
 
     // Ctrl+letter -> control codes (Ctrl+C, Ctrl+D, ...).
     if ctrl {
-        if let Key::Character(s) = &event.logical_key {
+        if let Key::Character(s) = key {
             if s.len() == 1 {
                 let c = s.chars().next().unwrap().to_ascii_lowercase();
                 if ('a'..='z').contains(&c) {
@@ -197,7 +225,7 @@ pub fn map_key(event: &KeyEvent, mods: &Modifiers, alt_screen: bool) -> InputAct
     }
 
     // Printable text (includes paste via IME / dead keys resolved by winit).
-    if let Some(text) = event.text.as_ref() {
+    if let Some(text) = text {
         if !text.is_empty() {
             return InputAction::PtyInput(text.as_bytes().to_vec());
         }
@@ -381,5 +409,90 @@ mod tests {
             press("P", ctrl_shift()),
             Some(InputAction::PrevTab)
         ));
+    }
+
+    fn map_key_for(key: Key, text: Option<&str>, copymode: bool) -> InputAction {
+        map_key_parts(
+            &key,
+            text,
+            ModifiersState::empty(),
+            false,
+            copymode,
+        )
+    }
+
+    /// Regression: plain `v`/`V`/`y` were mapped to copymode actions even
+    /// when copymode was off, so they never reached the PTY.
+    #[test]
+    fn plain_v_and_y_reach_the_pty_when_copymode_is_off() {
+        for ch in ["v", "V", "y"] {
+            match map_key_for(Key::Character(ch.into()), Some(ch), false) {
+                InputAction::PtyInput(bytes) => assert_eq!(bytes, ch.as_bytes()),
+                _ => panic!("{ch:?} was swallowed instead of sent to the PTY"),
+            }
+        }
+    }
+
+    #[test]
+    fn copymode_owns_v_and_y_only_when_active() {
+        assert!(matches!(
+            map_key_for(Key::Character("v".into()), Some("v"), true),
+            InputAction::CopymodeSelect
+        ));
+        assert!(matches!(
+            map_key_for(Key::Character("V".into()), Some("V"), true),
+            InputAction::CopymodeSelectLine
+        ));
+        assert!(matches!(
+            map_key_for(Key::Character("y".into()), Some("y"), true),
+            InputAction::CopymodeCopy
+        ));
+    }
+
+    /// Regression: arrows/Home/End were also hijacked by copymode, so the
+    /// shell never saw cursor movement.
+    #[test]
+    fn navigation_keys_reach_the_pty_when_copymode_is_off() {
+        for (key, bytes) in [
+            (NamedKey::ArrowUp, b"\x1b[A".as_slice()),
+            (NamedKey::ArrowDown, b"\x1b[B".as_slice()),
+            (NamedKey::ArrowLeft, b"\x1b[D".as_slice()),
+            (NamedKey::ArrowRight, b"\x1b[C".as_slice()),
+            (NamedKey::Home, b"\x1b[H".as_slice()),
+            (NamedKey::End, b"\x1b[F".as_slice()),
+        ] {
+            match map_key_for(Key::Named(key), None, false) {
+                InputAction::PtyInput(got) => assert_eq!(got, bytes.to_vec(), "{key:?}"),
+                _ => panic!("{key:?} was swallowed instead of sent to the PTY"),
+            }
+        }
+    }
+
+    #[test]
+    fn navigation_keys_move_the_copymode_cursor_when_active() {
+        assert!(matches!(
+            map_key_for(Key::Named(NamedKey::ArrowUp), None, true),
+            InputAction::CopymodeUp
+        ));
+        assert!(matches!(
+            map_key_for(Key::Named(NamedKey::PageDown), None, true),
+            InputAction::CopymodePageDown
+        ));
+    }
+
+    #[test]
+    fn page_up_scrolls_locally_but_reaches_alt_screen_apps() {
+        assert!(matches!(
+            map_key_for(Key::Named(NamedKey::PageUp), None, false),
+            InputAction::ScrollPageUp
+        ));
+        let in_app = map_key_parts(
+            &Key::Named(NamedKey::PageUp),
+            None,
+            ModifiersState::empty(),
+            true,
+            false,
+        );
+        assert!(matches!(in_app, InputAction::PtyInput(_)));
     }
 }
