@@ -25,7 +25,7 @@ toolkit. Currently **v0.3.0**, installed via `./install.sh` into `~/.local`.
 | Config | serde 1 + toml 0.8, watched with notify 6 |
 | CLI | clap 4 |
 
-Size: **~6,980 lines / 8 modules / 41 headless tests** (`cargo test`).
+Size: **~10,620 lines / 12 modules / 59 headless tests** (`cargo test`).
 
 ### 1.1 Already shipped (do not redo)
 
@@ -106,15 +106,20 @@ screen as well as by tests, and every item below is a real commit.
 
 ### 1.5 In flight / open threads
 
-- Nothing half-finished. Batch B's published slice (B0–B3) ends with a clean
-  build and **41/41 tests** green.
-- Two known gaps, both deliberate and recorded rather than hidden:
-  - **Search has no visible query field.** Matches highlight and the pane
-    scrolls, but the typed query and match count are not drawn anywhere yet;
-    a persistent search bar is the next B1 polish item.
-  - **`SGR 4` (plain underline) is still not drawn.** B2 underlines hyperlink
-    cells only; `CellStyle` carries bold/italic but no underline flag. This is
-    the cheap fidelity fix listed in §4.
+- Nothing half-finished. Batch D (D1–D10) is in, with a clean build and
+  **59/59 tests** green.
+- Both gaps recorded at v0.3.0 are now closed:
+  - **Search draws its query.** D1 replaced the invisible query with a
+    floating pill in the body's top-right corner (`/query  (N)`), so it
+    shows even when the tab strip is hidden.
+  - **`SGR 4` is drawn.** D5 added the `underline` flag to `CellStyle` and
+    maps it to `Attrs::underline(Single)`; hyperlink cells keep their
+    underline too.
+- Still unrecorded as gaps, worth a look next:
+  - The command palette's list is a plain substring filter (`fuzzy_score`
+    exists but is not used for ranking); ties keep command order.
+  - Sixel/Kitty graphics parse into state but are not blitted to the
+    surface yet.
 
 ### 1.6 Git history (through v0.3.0)
 
@@ -165,27 +170,33 @@ Everything after `f5d4b46` is original work as well, one commit per feature:
 ├── install.sh / uninstall.sh / launcher.sh
 ├── assets/                     neoterm.desktop, neoterm.svg
 └── crates/neoterm/src/
-    ├── main.rs      (~1920)  App event loop, mouse/keyboard handlers, draw
+    ├── main.rs      (~2870)  App event loop, mouse/keyboard handlers, draw
     │                          orchestration, config watcher, strip-visibility
     │                          reflow, font zoom + grid reflow, visual bell,
-    │                          tab rename mode, search bar + hyperlink opening
-    ├── tab.rs       (~1860)  Pane (PTY, grid, selection, OSC title listener),
+    │                          tab rename mode, search bar, palette dispatch,
+    │                          hyperlink opening
+    ├── tab.rs       (~2030)  Pane (PTY, grid, selection, OSC title listener),
     │                          PaneNode split tree, layout_tree /
     │                          focus_neighbor / clamp_ratio, Tab container
     │                          (title pins), free render_term_rows
-    ├── renderer.rs  (~1330)  wgpu setup, per-pane buffer caches, font-family
+    ├── renderer.rs  (~1960)  wgpu setup, per-pane buffer caches, font-family
     │                          + advance probing, pass 1 alpha rects (incl.
-    │                          cursor geometry, focus outline, toast),
-    │                          pass 2 shaped text, bell flash
-    ├── config.rs    (~550)   NeotermConfig + Theme pack, preset application,
+    │                          cursor geometry, focus outline, toast, palette
+    │                          panel, search pill, HUD), pass 2 shaped text
+    ├── config.rs    (~570)   NeotermConfig + Theme pack, preset application,
     │                          sRGB→linear conversion, `bell` option
     ├── mouse.rs     (~480)   pure geometry: labels, regions, close/+ zones,
     │                          scrollbar math, SGR encoding
-    ├── search.rs    (~345)   pure scrollback search: match list, next/prev,
+    ├── palette.rs   (~585)   command table + substring filter, selection
+    │                          scrolling, palette → InputAction mapping
+    ├── graphics.rs  (~525)   Sixel / Kitty inline-image parsing and state
+    ├── session.rs   (~395)   session snapshot: save/load JSON, tab/pane tree
+    ├── search.rs    (~355)   pure scrollback search: match list, next/prev,
     │                          case folding — no winit/wgpu dependency
-    ├── input.rs     (~260)   key event → InputAction (chrome_action table)
-    └── tabs.rs      (~235)   tab list, ids, split/close/focus/zoom dispatch,
-                              dead-pane reaping, title pins
+    ├── input.rs     (~385)   key event → InputAction (chrome_action table)
+    ├── tabs.rs      (~270)   tab list, ids, split/close/focus/zoom dispatch,
+    │                          dead-pane reaping, title pins
+    └── shell_integration.rs (~215) OSC 7/133/633 → cwd, prompt, status
 ```
 
 Architecture at a glance:
@@ -313,16 +324,16 @@ isolation.
 
 | Item | Description | Scope |
 |------|-------------|-------|
-| **D1. Persistent search bar** | Draw the typed query + match count in the tab strip (reusing the rename overlay pattern). `Enter`/`Shift+Enter` still jump, `Esc` closes. | `main.rs`, `renderer.rs`, `search.rs` (~120 lines) |
-| **D2. Command palette** | `Ctrl+Shift+P` opens a fuzzy-searchable overlay: new tab/split/window, theme picker, font zoom, copy mode, session save/load, config shortcuts. Pure keyboard, no mouse required. | `main.rs`, `renderer.rs`, new `palette.rs` (~250 lines) |
-| **D3. Session manager CLI** | `neoterm session save <name>`, `load <name>`, `list`, `delete`, `autosave on/off`. Sessions are JSON (already implemented in C2); CLI just wires them. | `main.rs`, `session.rs`, `clap` (~150 lines) |
+| ~~**D1. Persistent search bar**~~ | ~~Draw the typed query + match count in the tab strip.~~ Shipped as a **floating pill in the body's top-right corner**, not in the tab strip, so it still appears with `tab_bar = never`. The label reads `/query  (N)`; `Enter`/`Shift+Enter` jump, `Esc` closes. | `main.rs`, `renderer.rs`, `search.rs` (~120 lines) | ✅ `4cfdaa4` → `7317b42` |
+| ~~**D2. Command palette**~~ | ~~`Ctrl+Shift+P` opens a fuzzy-searchable overlay.~~ Shipped: new tab/window, splits, focus, zoom, font size, rename/unpin, broadcast, copymode, search, themes, copy/paste and session commands. Pure keyboard. The panel is sized to the window (max 10 rows) and **scrolls** the rest; the query bar shows `selected/total`. | `main.rs`, `renderer.rs`, `palette.rs` (~580 lines) | ✅ `8afc0d8`, `6000b43`, `fc66d09`, `3a117a0`, `1427c02`, `d8972b5` |
+| ~~**D3. Session manager CLI**~~ | ~~`neoterm session save <name>`, `load <name>`, `list`, `delete`, `autosave on/off`.~~ Sessions are JSON (C2); the CLI wires them plus theme management. | `main.rs`, `session.rs`, `clap` (~150 lines) | ✅ `58ac24f`, `5944f7b` |
 | ~~**D4. Shell integration**~~ | ~~OSC 7 (cwd), OSC 133 (prompt mark), OSC 633 (command status). Fish/Zsh/Bash snippets in `assets/`. Enables: per-pane cwd tracking, jump-to-previous-prompt, failed-command highlight.~~ | `tab.rs`, `main.rs`, `assets/` (~200 lines + snippets) | ✅ `ce61a2e`
-| **D5. SGR 4 underline** | Add `underline` flag to `CellStyle` in `tab.rs`, map to `Attrs::underline(UnderlineStyle::Single)` in `renderer.rs::row_attrs`. Fixes the last ANSI fidelity gap from B2. | `tab.rs`, `renderer.rs` (~30 lines) |
-| **D6. Performance HUD** | `Ctrl+Shift+Alt+F` toggles a corner overlay: frame time (ms), FPS, GPU memory, atlas usage, dirty pane count. Helps catch regressions. | `renderer.rs`, `main.rs` (~100 lines) |
-| **D7. Lazy pane rendering** | Don't shape/upload glyphs for panes scrolled out of view or fully occluded. Only the focused pane + visible neighbors render every frame. | `renderer.rs`, `main.rs` (~150 lines) |
-| **D8. Windows/ConPTY support** | `portable-pty` already supports ConPTY; wire it behind `cfg(windows)` in `tab.rs::spawn`. Add MSVC CI. | `tab.rs`, `Cargo.toml`, `.github/` (~200 lines) |
-| **D9. Man page + keybindings cheatsheet** | `neoterm.1` (ronn/markdown → man), `KEYBINDINGS.md` (auto-generated from `input.rs::chrome_action`). Install via `install.sh`. | `docs/`, `install.sh`, `input.rs` (~100 lines) |
-| **D10. CI/CD pipeline** | GitHub Actions: `cargo test`, `cargo build --release`, `cargo audit`, `cargo deny`, release artifacts + checksums on tag. | `.github/workflows/` (~150 lines YAML) |
+| ~~**D5. SGR 4 underline**~~ | ~~Add `underline` flag to `CellStyle` in `tab.rs`, map to `Attrs::underline(UnderlineStyle::Single)` in `renderer.rs::row_attrs`.~~ Fixes the last ANSI fidelity gap from B2. | `tab.rs`, `renderer.rs` (~30 lines) | ✅ `bc4326d` |
+| ~~**D6. Performance HUD**~~ | ~~`Ctrl+Shift+Alt+F` toggles a corner overlay: frame time (ms), FPS, dirty pane count.~~ | `renderer.rs`, `main.rs` (~100 lines) | ✅ `2498936` |
+| ~~**D7. Lazy pane rendering**~~ | ~~Don't shape/upload glyphs for panes that are not visible.~~ | `renderer.rs`, `main.rs` (~150 lines) | ✅ `2498936` |
+| ~~**D8. Windows/ConPTY support**~~ | ~~`portable-pty` already supports ConPTY; wire it behind `cfg(windows)` in `tab.rs::spawn`. Add MSVC CI.~~ | `tab.rs`, `Cargo.toml`, `.github/` (~200 lines) | ✅ `2498936` |
+| ~~**D9. Man page + keybindings cheatsheet**~~ | ~~`neoterm.1`, `KEYBINDINGS.md`. Install via `install.sh`.~~ | `docs/`, `install.sh`, `input.rs` (~100 lines) | ✅ `2498936` |
+| ~~**D10. CI/CD pipeline**~~ | ~~GitHub Actions: `cargo test`, `cargo build --release`, `cargo audit`, `cargo deny`, release artifacts + checksums on tag.~~ | `.github/workflows/` (~150 lines YAML) | ✅ `2f074cd` |
 
 **Suggested order:** D1 → D5 (fidelity) → D2 (UX centerpiece) → D3 (workflow) → D4 (shell integration) → D6/D7 (perf) → D8/D9/D10 (platform/polish).
 
@@ -332,7 +343,7 @@ isolation.
 
 ```bash
 cd /home/bruce/NeoTerm
-cargo test                      # 41 headless tests, must stay green
+cargo test                      # 59 headless tests, must stay green
 cargo build                     # debug
 cargo build --release           # optimized (LTO, ~8 min)
 ./install.sh                    # release + install to ~/.local
@@ -425,6 +436,15 @@ required — Xvfb alone cannot create a wgpu surface on this machine):
 | **Terminal freezes when search opens** | Keyboard handler consumed ALL keys but only handled Backspace/Escape/printable. Enter, arrows, Ctrl+Shift+F again were silently swallowed. | Only consume search-relevant keys (Backspace, Escape, Enter, printable). Others fall through to normal chrome_action/map_key. Added Enter=next match, Shift+Enter=prev match. | `be31f5b` |
 | **Search bar not visible (panic)** | Double `unwrap()` on `Option<(&str, usize)>` — first unwrap consumed the Option, second panicked. | Properly destructure once with `if let Some((query, match_count)) = search`. | `83f9fb7` |
 | **Search bar invisible when tab strip hidden** | Search bar rendering was inside `if strip { ... }` block. Invisible when `tab_bar=never` or `auto` with 1 tab. | Move search bar rendering outside strip condition — always renders when search active. | `7219b84` |
+
+### Command Palette (D2) — `Ctrl+Shift+P`
+
+| Bug | Root Cause | Fix | Commit |
+|-----|------------|-----|--------|
+| **Panel taller than the window** | `panel_h` was derived from the match count (`content_lines = 1 + item_count * 4`), so the 31-command list asked for several times the window height and most rows were clipped. | Size the panel from the window and cap it at 10 rows; the rest scrolls. The selection stays in view on Up/Down and after a filter change, and a fresh open starts at the top. | `d8972b5` |
+| **Command rows never drew** | cosmic-text concatenates the *texts* of the spans it is given; the `\n` separators were pushed between spans instead of inside them, so every row collapsed into one wrapped paragraph and only the query line was visible. | Put each newline inside the preceding span, shape only the visible slice, and give each row its own line. The HUD overlay had the same bug and got the same fix. | `d8972b5` |
+| **Palette reopened on the previous selection** | `toggle()` cleared the query but not `selected`, so reopening jumped back to the last highlighted command. | Reset `selected` and `scroll` when the palette opens. | `d8972b5` |
+| **Long labels ran under the border** | Lines were shaped at full length inside a fixed-width panel. | Truncate label/description to the panel's inner columns with an ellipsis (char-counted, so UTF-8 is never cut). | `d8972b5` |
 
 ### Shell Integration (D4) — OSC 7/133/633
 

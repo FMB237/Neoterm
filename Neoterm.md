@@ -19,7 +19,7 @@ dependencies beyond the GPU stack. Currently at **v0.3.0**, installed via
 | Config file | serde 1 + toml 0.8, watched with notify 6 |
 | CLI (`-e`, `--version`) | clap 4 |
 
-~6,980 lines across 8 modules, 41 headless unit tests (`cargo test`).
+~10,620 lines across 12 modules, 59 headless unit tests (`cargo test`).
 
 ## Milestones shipped
 
@@ -79,6 +79,7 @@ dependencies beyond the GPU stack. Currently at **v0.3.0**, installed via
 | `Ctrl+Shift+Plus` / `Minus` / `0` | Font size up / down / reset (session-only) |
 | `Ctrl+Shift+R` / `U` | Rename the active tab (Enter commits, Esc cancels) / release it back to the live title |
 | `Ctrl+Shift+F` | Search scrollback + viewport (`Enter` next, `Shift+Enter` previous, `Esc` closes) |
+| `Ctrl+Shift+P` | Command palette: filter commands, `Up`/`Down` to move, `Enter` to run, `Esc` to close |
 | `Ctrl+click` | Open an OSC 8 hyperlink with the system opener |
 | `PageUp/PageDown` (`Shift` forces local) | Scrollback, unless a fullscreen app owns the keys |
 | Double / triple click | Word / line select (400 ms window) |
@@ -142,30 +143,37 @@ winit events ──▶ input::map_key ──▶ InputAction ──▶ App (main.
 
 **Module map** (`crates/neoterm/src/`, lines approx):
 
-- `main.rs` (~1920) — `App` event loop, all mouse/keyboard handlers,
+- `main.rs` (~2870) — `App` event loop, all mouse/keyboard handlers,
   draw orchestration, config watcher, strip-visibility reflow, font zoom
-  and grid reflow, visual bell, tab rename mode, the search session and
-  hyperlink opening.
-- `tab.rs` (~1860) — `Pane` (one terminal: PTY, grid, selection, OSC title
+  and grid reflow, visual bell, tab rename mode, the search session, palette
+  dispatch, session commands and hyperlink opening.
+- `tab.rs` (~2030) — `Pane` (one terminal: PTY, grid, selection, OSC title
   listener), `PaneNode` split tree, pure cell layout (`layout_tree`,
   `focus_neighbor`, `clamp_ratio`), `Tab` container delegating single-pane
   behavior to the focused pane, free `render_term_rows` for headless tests.
-- `renderer.rs` (~1330) — wgpu setup, per-pane text-buffer caches keyed by
+- `renderer.rs` (~1960) — wgpu setup, per-pane text-buffer caches keyed by
   pane id (pruned on close), font-family/glyph-advance probing, pass 1:
   alpha-blended solid rects (strip, accent underline, dividers, cell
-  backgrounds, selection, scrollbar, cursor geometry, focus outline, toast)
-  in linear color, pass 2: shaped text clipped per pane.
-- `tabs.rs` (~235) — tab list, ids, split/close/focus/zoom dispatch,
+  backgrounds, selection, scrollbar, cursor geometry, focus outline, toast,
+  palette panel, search pill, HUD) in linear color, pass 2: shaped text
+  clipped per pane.
+- `tabs.rs` (~270) — tab list, ids, split/close/focus/zoom dispatch,
   dead-pane reaping (never respawns; empty list quits the app), title pins.
 - `mouse.rs` (~480) — pure geometry: labels, regions, close/`+` zones,
   scrollbar math, SGR encoding. Clicks always land on what is drawn.
-- `search.rs` (~345) — pure scrollback search: match list over history and
+- `palette.rs` (~585) — command table, substring filter, selection and
+  scroll window, palette → `InputAction` mapping.
+- `graphics.rs` (~525) — Sixel / Kitty inline-image parsing and state.
+- `session.rs` (~395) — session snapshot: save/load JSON, tab and pane tree.
+- `search.rs` (~355) — pure scrollback search: match list over history and
   viewport, next/previous with wraparound, case folding. No winit/wgpu.
-- `input.rs` (~260) — key event → `InputAction` mapping (`chrome_action`
+- `input.rs` (~385) — key event → `InputAction` mapping (`chrome_action`
   holds the pure shortcut table).
-- `config.rs` (~550) — `NeotermConfig` + `Theme` pack with legacy-tolerant
+- `config.rs` (~570) — `NeotermConfig` + `Theme` pack with legacy-tolerant
   serde defaults, preset application, and sRGB→linear conversion for the
   swapchain.
+- `shell_integration.rs` (~215) — OSC 7/133/633 → cwd, prompt marks, command
+  status.
 
 **Load-bearing invariants** (do not break these):
 
@@ -205,7 +213,7 @@ transparency/blur; Vi keyboard selection (copymode); graphics protocols
 ## Verify / build
 
 ```bash
-cargo test                      # 41 headless tests
+cargo test                      # 59 headless tests
 cargo build                     # debug
 cargo build --release           # optimized (LTO, ~8 min)
 ./install.sh                    # release + install to ~/.local

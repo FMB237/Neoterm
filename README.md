@@ -8,7 +8,7 @@ winit 0.30 · wgpu 30 · glyphon 0.12 + cosmic-text 0.19
 alacritty_terminal 0.26 · portable-pty 0.9 · arboard 3
 ```
 
-~7,000 lines of Rust across 8 modules, 41 headless unit tests.
+~10,600 lines of Rust across 12 modules, 59 headless unit tests.
 
 ---
 
@@ -72,6 +72,7 @@ neoterm -e htop                  # run a command instead of the shell
 | `Ctrl+Shift+Plus` / `Minus` / `0` | Font size up / down / reset |
 | `Ctrl+Shift+R` / `U` | Rename the active tab / release it to the live title |
 | `Ctrl+Shift+F` | Search scrollback (`Enter` next, `Shift+Enter` previous, `Esc` closes) |
+| `Ctrl+Shift+P` | Command palette (`Up`/`Down` move, `Enter` runs, `Esc` closes) |
 | `Ctrl+click` | Open a hyperlink |
 | `PageUp/PageDown` (`Shift` forces local) | Scrollback |
 | Double / triple click | Word / line select |
@@ -104,7 +105,7 @@ preset = "tokyo-night"    # tokyo-night | catppuccin-mocha | dracula |
 ## Building from source
 
 ```bash
-cargo test             # 41 headless tests
+cargo test             # 59 headless tests
 cargo build --release  # optimized (LTO)
 ```
 
