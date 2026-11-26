@@ -754,7 +754,7 @@ impl Renderer {
                                 .weight(Weight::NORMAL)
                         };
                         // Right-align keybinds: pad the label line
-                        let padded_label = format!("{:>70.70}  {}", label_text, cmd.keybinds);
+                        let padded_label = format!("{:>35.35}  {}", label_text, cmd.keybinds);
                         str_storage.push(padded_label);
                         line_defs.push((str_storage.len() - 1, kb_attrs));
                     } else {
@@ -1267,7 +1267,7 @@ impl Renderer {
                 let selected_idx = palette.selected.min(palette.filtered.len().saturating_sub(1));
                 let item_count = palette.filtered.len();
                 let content_lines = 1 + item_count * 4;
-                let panel_w = (70.0 * cell).max(200.0);
+                let panel_w = (45.0 * cell).max(150.0);
                 let panel_h = (content_lines as f32 * line_h * 1.1) + pad * 2.0;
                 let x0 = (w as f32 - panel_w) / 2.0;
                 let y0 = (h as f32 - panel_h) / 2.0;
