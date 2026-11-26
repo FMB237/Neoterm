@@ -60,7 +60,7 @@ fn apply_window_effects(attrs: winit::window::WindowAttributes, cfg: &NeotermCon
         {
             if cfg.blur == "acrylic" || cfg.blur == "auto" {
                 // Windows 11 acrylic blur
-                attrs = attrs.with_blur_behind(true);
+                attrs = attrs.with_blur(true);
             }
         }
         #[cfg(target_os = "macos")]
@@ -77,7 +77,7 @@ fn apply_window_effects(attrs: winit::window::WindowAttributes, cfg: &NeotermCon
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "neoterm", version, about = "NeoTerm v0.3 - GPU terminal")]
+#[command(name = "neoterm", version, about = "NeoTerm v0.4 - GPU terminal")]
 struct Args {
     /// Command / shell to run (overrides config)
     #[arg(short = 'e', long)]
@@ -820,6 +820,7 @@ impl App {
                     pane.clear_selection();
                 }
             }
+            #[cfg(target_os = "linux")]
             self.copy_primary(ws);
             ws.force_draw = true;
             ws.window.request_redraw();
@@ -1333,6 +1334,7 @@ impl App {
         self.set_toast(ws, format!("pasted \u{00b7} {chars} chars"));
     }
     
+    #[cfg(target_os = "linux")]
     /// X11 middle-click: paste the PRIMARY selection buffer.
     fn do_paste_primary(&mut self, ws: &mut WindowState) {
         let text = match self.clipboard() {
@@ -1350,6 +1352,7 @@ impl App {
         self.set_toast(ws, format!("pasted \u{00b7} {chars} chars"));
     }
     
+    #[cfg(target_os = "linux")]
     /// X11 select-to-copy: mirror the active selection into PRIMARY.
     fn copy_primary(&mut self, ws: &mut WindowState) {
         let has_sel = ws
@@ -2555,7 +2558,9 @@ impl ApplicationHandler for App {
                 match (button, state) {
                     (MouseButton::Left, ElementState::Pressed) => self.on_left_press(&mut window_state),
                     (MouseButton::Left, ElementState::Released) => self.on_left_release(&mut window_state),
+                    #[cfg(target_os = "linux")]
                     (MouseButton::Middle, ElementState::Pressed) => self.on_middle_press(&mut window_state),
+                    #[cfg(target_os = "linux")]
                     (MouseButton::Middle, ElementState::Released) => self.on_middle_release(&mut window_state),
                     _ => {}
                 }
