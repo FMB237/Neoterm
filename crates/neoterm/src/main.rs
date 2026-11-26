@@ -517,14 +517,26 @@ impl App {
     }
     
     /// Divider under the cursor, if any.
+    /// Divider under the cursor, if any. Checks the exact cell plus
+    /// immediate neighbors (1-cell tolerance) since dividers are only 1 cell wide.
     fn divider_grab(&self, ws: &WindowState, x: f64, y: f64) -> Option<(usize, Vec<bool>, SplitDir, CellRect)> {
         let scale = ws.window.scale_factor() as f32;
         let (cell_w, line_h, left, top) = ws.renderer.body_geometry(scale, Self::strip_on(&self.cfg.tab_bar, ws));
         let hit = mouse::hit_test(x, y, cell_w, line_h, left, top, 100_000, 10_000, 0)?;
         let tab = ws.tabs.active()?;
-        let (path, _) = tab.divider_at(hit.col, hit.grid_line as usize)?;
-        let (dir, parent) = tab.divider_info(&path)?;
-        Some((ws.tabs.active_index(), path, dir, parent))
+        // Check exact hit cell and ±1 column/row for easier targeting
+        for dc in [0i32, -1, 1] {
+            for dr in [0i32, -1, 1] {
+                let c = (hit.col as i32).saturating_add(dc) as usize;
+                let r = (hit.grid_line as i32).saturating_add(dr) as usize;
+                if let Some((path, _)) = tab.divider_at(c, r) {
+                    if let Some((dir, parent)) = tab.divider_info(&path) {
+                        return Some((ws.tabs.active_index(), path, dir, parent));
+                    }
+                }
+            }
+        }
+        None
     }
     
     /// Scrollbar live geometry + history.
@@ -673,6 +685,7 @@ impl App {
         
         // Divider drag start (on divider edge)
         if let Some((tab_idx, path, dir, parent)) = self.divider_grab(ws, pos.x, pos.y) {
+            eprintln!("DEBUG divider_grab: tab={} path={:?} dir={:?} parent={:?}", tab_idx, path, dir, parent);
             ws.split_drag = Some(SplitDrag { tab: tab_idx, path, dir, parent });
             self.set_split_cursor(ws, Some(match dir {
                 SplitDir::V => CursorIcon::EwResize,
@@ -962,6 +975,18 @@ impl App {
         if ws.pane_drag.is_some() {
             ws.force_draw = true;
             ws.window.request_redraw();
+        }
+        
+        // Divider hover: show resize cursor when over a divider (not dragging)
+        if ws.split_drag.is_none() {
+            if let Some((_, _, dir, _)) = self.divider_grab(ws, pos.x, pos.y) {
+                self.set_split_cursor(ws, Some(match dir {
+                    SplitDir::V => CursorIcon::EwResize,
+                    SplitDir::H => CursorIcon::NsResize,
+                }));
+            } else if ws.split_cursor.is_some() {
+                self.set_split_cursor(ws, None);
+            }
         }
         
         // Selection drag
