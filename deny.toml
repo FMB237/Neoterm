@@ -1,13 +1,6 @@
 [advisories]
-# Path to the vulnerability database to use. If not specified, the
-# built-in database will be used.
-# db-path = "advisory-db"
-# Path to a directory containing clone of the advisory-db repo.
-# db-url = "https://github.com/RustSec/advisory-db"
 
 [licenses]
-# List of allowed licenses. By default, all licenses are allowed.
-# See https://spdx.org/licenses/ for valid license identifiers.
 allow = [
     "MIT",
     "Apache-2.0",
@@ -19,32 +12,12 @@ allow = [
 ]
 
 [licenses.private]
-# If true, allow licenses not in the allow list for private crates.
-# ignore = false
+ignore = false
 
 [bans]
-# Lint level for multiple versions of the same crate.
 multiple-versions = "warn"
-# Lint level for crates that use wildcard dependencies.
 wildcards = "deny"
-# Lint level for dependencies that specify version requirements with no upper bound.
-unbounded = "warn"
-# Deny specific crates by name.
-# deny = []
-# Deny specific versions of crates.
-# deny = [ { name = "foo", version = "= 1.2.3" } ]
-# Allow specific versions of crates that would otherwise be banned.
-# allow = []
-# Highlight crates that are not in the deny list but might be of interest.
-highlight = [
-    { name = "yansi", reason = "Used for colored output in tests" },
-    { name = "atty", reason = "Terminal detection for tests" },
-    { name = "which", reason = "Used in tests for command lookup" },
-    { name = "dirs", reason = "Directory resolution for config" },
-]
 
 [sources]
-# Unknown git sources are allowed by default. Set to "deny" to disallow.
 unknown-git = "allow"
-# Unknown registry sources are allowed by default. Set to "deny" to disallow.
 unknown-registry = "allow"
