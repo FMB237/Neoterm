@@ -7,8 +7,7 @@ use alacritty_terminal::term::{
     Config as TermConfig, Term, TermDamage, TermMode,
 };
 use alacritty_terminal::selection::{Selection, SelectionRange, SelectionType};
-use alacritty_terminal::vte::ansi::{self, Color as AnsiColor, CursorShape, NamedColor, Rgb};
-use alacritty_terminal::vte::Params;
+use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedColor, Rgb};
 use anyhow::{Context, Result};
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use serde::{Deserialize, Serialize};
@@ -19,8 +18,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use crate::shell_integration::{preprocess_shell_integration, new_shared_shell_integration, SharedShellIntegration};
-use crate::graphics::{preprocess_graphics, new_shared_graphics_state, SharedGraphicsState, GraphicsProtocol, GraphicsState};
+use crate::shell_integration::{new_shared_shell_integration, SharedShellIntegration};
+use crate::graphics::{new_shared_graphics_state, SharedGraphicsState};
 use winit::event_loop::EventLoopProxy;
 
 use std::collections::HashMap;

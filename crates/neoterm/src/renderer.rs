@@ -238,10 +238,10 @@ impl Renderer {
         // Use a slightly taller line height (1.35) for better readability and cursor positioning
         let line_height = font_size * LINE_HEIGHT;
         let mut tab_buffer = Buffer::new(&mut font_system, Metrics::new(font_size, line_height));
-        let mut toast_buffer = Buffer::new(&mut font_system, Metrics::new(font_size, line_height));
-        let mut search_buffer = Buffer::new(&mut font_system, Metrics::new(font_size, line_height));
+        let toast_buffer = Buffer::new(&mut font_system, Metrics::new(font_size, line_height));
+        let search_buffer = Buffer::new(&mut font_system, Metrics::new(font_size, line_height));
         let mut palette_buffer = Buffer::new(&mut font_system, Metrics::new(font_size, line_height));
-        let mut hud_buffer = Buffer::new(&mut font_system, Metrics::new(font_size, line_height));
+        let hud_buffer = Buffer::new(&mut font_system, Metrics::new(font_size, line_height));
         tab_buffer.set_size(Some(2000.0), Some(40.0));
         palette_buffer.set_size(Some(800.0), Some(600.0));
 
@@ -915,7 +915,7 @@ impl Renderer {
                     if let Some(&(x0, x1)) = regions.get(hover_idx) {
                         let pill_h = (body_top * 0.65).max(self.font_size * 1.1 * scale);
                         let pill_y = (body_top - pill_h) / 2.0;
-                        let radius = (pill_h / 2.0).min(8.0 * scale);
+                        let _radius = (pill_h / 2.0).min(8.0 * scale);
                         // Draw rounded pill using multiple quads (simulated)
                         let pad = 4.0 * scale;
                         push_quad(
@@ -1381,7 +1381,7 @@ impl Renderer {
         // Shows magnifying glass icon, query text, and current/total match count.
         // Always rendered when search is active, regardless of tab strip visibility.
         let mut search_rect: Option<(f32, f32, f32, f32)> = None;
-        if let Some((query, match_count, current)) = search {
+        if let Some((query, match_count, _current)) = search {
             let line_h = self.font_size * 1.3 * scale;
             let pad = 10.0 * scale;
             let cell = self.advance() * scale;

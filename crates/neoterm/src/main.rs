@@ -609,7 +609,7 @@ impl App {
                 return;
             }
             if let Some(i) = tab_click {
-                if let Some(tabs) = ws.tabs.get_mut(i) {
+                if let Some(_tabs) = ws.tabs.get_mut(i) {
                     let close_x = (|| {
                         let scale = ws.window.scale_factor() as f32;
                         let g = ws.renderer.body_geometry(scale, Self::strip_on(&self.cfg.tab_bar, ws));
@@ -634,7 +634,7 @@ impl App {
         }
         
         // Body: selection / divider / tab drag / pane drag
-        let Some((pid, col, vrow, side)) = self.pane_cell_at(ws, pos.x, pos.y) else {
+        let Some((pid, col, vrow, _side)) = self.pane_cell_at(ws, pos.x, pos.y) else {
             return;
         };
         
@@ -694,7 +694,7 @@ impl App {
             if let Some(pane) = tab.pane(anchor.0) {
                 let point = Point::new(Line(anchor.1), Column(anchor.2));
                 pane.begin_selection(SelectionType::Simple, point, Side::Left);
-                let (start, end) = Self::word_bounds_from_grid(&tab, anchor.0, anchor.1, anchor.2);
+                let (_start, end) = Self::word_bounds_from_grid(&tab, anchor.0, anchor.1, anchor.2);
                 let end_point = Point::new(Line(anchor.1), Column(end));
                 pane.update_selection(end_point, Side::Right);
             }
@@ -719,7 +719,7 @@ impl App {
         ws.left_held = false;
         
         // Tab drag drop
-        if let Some(src) = ws.tab_drag.take() {
+        if let Some(_src) = ws.tab_drag.take() {
             ws.force_draw = true;
             ws.window.request_redraw();
             return;
@@ -1019,10 +1019,10 @@ impl App {
         
         // Scrollbar drag
         if let Some(drag) = ws.scroll_drag {
-            if let Some((bar, track_x, history, viewport_rows)) = self.scrollbar_geom(ws) {
+            if let Some((bar, _track_x, history, viewport_rows)) = self.scrollbar_geom(ws) {
                 let scale = ws.window.scale_factor() as f32;
                 let track_h = (bar.track_h * scale).max(1.0);
-                let thumb_h = bar.thumb.map(|t| t.1 * scale).unwrap_or(0.0);
+                let _thumb_h = bar.thumb.map(|t| t.1 * scale).unwrap_or(0.0);
                 let max_scroll = history.saturating_sub(viewport_rows);
                 let new_scroll = ((drag + lines as f32 / track_h.max(1.0)) * max_scroll as f32)
                     .clamp(0.0, max_scroll as f32)
@@ -1685,7 +1685,7 @@ impl App {
     }
     
     /// Handle session save from palette.
-    fn handle_session_save(&mut self, ws: &mut WindowState) {
+    fn handle_session_save(&mut self, _ws: &mut WindowState) {
         use crate::session::{build_session_state, named_session_path};
         let state = build_session_state(self);
         let name = format!("session-{}", chrono::Local::now().format("%Y%m%d-%H%M%S"));
@@ -1697,8 +1697,8 @@ impl App {
     }
     
     /// Handle session load from palette.
-    fn handle_session_load(&mut self, event_loop: &ActiveEventLoop, ws: &mut WindowState) {
-        use crate::session::{list_sessions, named_session_path, session_file_path, SessionState};
+    fn handle_session_load(&mut self, event_loop: &ActiveEventLoop, _ws: &mut WindowState) {
+        use crate::session::{list_sessions, session_file_path, SessionState};
         // Load the default session file if it exists
         let default = session_file_path();
         if default.exists() {
@@ -1728,7 +1728,7 @@ impl App {
     }
     
     /// Handle session list from palette.
-    fn handle_session_list(&mut self, ws: &mut WindowState) {
+    fn handle_session_list(&mut self, _ws: &mut WindowState) {
         use crate::session::list_sessions;
         match list_sessions() {
             Ok(sessions) => {
@@ -1758,7 +1758,7 @@ impl App {
             let Some(pane) = tab.pane(pane_id) else { return };
             let Ok(term) = pane.term.lock() else { return };
             let cursor = term.grid().cursor.point;
-            let cols = term.columns().max(1) as usize;
+            let _cols = term.columns().max(1) as usize;
             let rows = term.screen_lines().max(1) as usize;
             // Convert cursor to viewport-relative coordinates
             let display_offset = term.grid().display_offset() as i32;
@@ -1805,7 +1805,7 @@ impl App {
     
     /// Move cursor down in copymode.
     fn copymode_down(&mut self, ws: &mut WindowState) {
-        let history = self.get_history_size(ws);
+        let _history = self.get_history_size(ws);
         let max_row = ws.renderer.grid_size(ws.window.inner_size().width, ws.window.inner_size().height, ws.window.scale_factor() as f32, true).1 as usize;
         if let Some(state) = ws.copymode.as_mut() {
             if state.cursor.0 < max_row.saturating_sub(1) {

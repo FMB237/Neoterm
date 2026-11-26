@@ -239,12 +239,12 @@ impl KittyDecoder {
         None
     }
 
-    fn process_delete(&mut self, params: &[&[u8]]) -> Option<GraphicsImage> {
+    fn process_delete(&mut self, _params: &[&[u8]]) -> Option<GraphicsImage> {
         // Delete action - not returning an image
         None
     }
 
-    fn process_query(&mut self, params: &[&[u8]]) -> Option<GraphicsImage> {
+    fn process_query(&mut self, _params: &[&[u8]]) -> Option<GraphicsImage> {
         // Query action - not returning an image
         None
     }
