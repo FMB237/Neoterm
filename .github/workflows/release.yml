@@ -88,7 +88,8 @@ jobs:
         run: cargo build --release
 
       - name: Build Windows installer (MSI)
-        run: cargo wix --no-build --bin-path ../target/release/neoterm.exe
+        working-directory: .
+        run: cargo wix --no-build --bin-path target/release/neoterm.exe
 
       - name: Upload Windows binary
         uses: actions/upload-artifact@v4
