@@ -38,7 +38,7 @@ jobs:
       - name: Create checksums
         run: |
           cd target/release
-          sha256sum neoterm neoterm.exe 2>/dev/null | tee checksums.txt
+          sha256sum neoterm 2>/dev/null | tee checksums.txt
           sha256sum neoterm > neoterm.sha256
           sha256sum *.deb 2>/dev/null >> checksums.txt
 
@@ -46,18 +46,15 @@ jobs:
         run: |
           cd target/release
           tar -czf neoterm-linux-x86_64.tar.gz neoterm 2>/dev/null || true
-          zip neoterm-windows-x86_64.zip neoterm.exe 2>/dev/null || true
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             target/release/neoterm
-            target/release/neoterm.exe
             target/release/checksums.txt
             target/release/neoterm.sha256
             target/release/neoterm-linux-x86_64.tar.gz
-            target/release/neoterm-windows-x86_64.zip
             target/release/debian/*.deb
           generate_release_notes: true
         env:
@@ -76,6 +73,11 @@ jobs:
 
       - name: Install cargo-wix
         run: cargo install cargo-wix
+
+      - name: Copy license and assets to crate for cargo-wix
+        run: |
+          Copy-Item LICENSE.rtf crates/neoterm/LICENSE.rtf
+          Copy-Item assets/neoterm.ico crates/neoterm/neoterm.ico
 
       - name: Build release
         run: cargo build --release
