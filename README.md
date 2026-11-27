@@ -67,6 +67,19 @@ neoterm -w ~/projects/app        # start the shell in a directory
 neoterm -e htop                  # run a command instead of the shell
 ```
 
+## Screenshots
+
+| Feature | Screenshot |
+|---------|------------|
+| Clean terminal | ![Clean terminal](assets/screenshots/ss1_clean.png) |
+| Command palette (`Ctrl+Shift+P`) | ![Command palette](assets/screenshots/ss2_palette.png) |
+| Commands output | ![Commands output](assets/screenshots/ss3_commands.png) |
+| Vertical split (`Ctrl+Shift+E`) | ![Vertical split](assets/screenshots/ss4_split.png) |
+| Horizontal split (`Ctrl+Shift+O`) | ![Horizontal split](assets/screenshots/ss5_hsplit.png) |
+| Search (`Ctrl+Shift+F`) | ![Search](assets/screenshots/ss6_search.png) |
+| Multiple tabs (`Ctrl+Shift+T`) | ![Multiple tabs](assets/screenshots/ss7_tabs.png) |
+| Theme picker | ![Theme picker](assets/screenshots/ss8_theme.png) |
+
 ## Keybindings
 
 | Keys | Action |
