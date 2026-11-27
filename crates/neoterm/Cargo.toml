@@ -42,7 +42,7 @@ percent-encoding = "2.3"
 [package.metadata.deb]
 maintainer = "FMB237 <miguelfouenanf@gmail.com>"
 copyright = "2026 FMB237 <miguelfouenanf@gmail.com>"
-license = "MIT"
+license-file = "LICENSE"
 section = "utils"
 priority = "optional"
 depends = "libvulkan1, libx11-6, libxkbcommon0, libwayland-client0, libasound2"
