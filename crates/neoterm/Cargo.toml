@@ -46,7 +46,7 @@ license = "MIT"
 section = "utils"
 priority = "optional"
 depends = "libvulkan1, libx11-6, libxkbcommon0, libwayland-client0, libasound2"
-description = """\
+extended-description = """
 NeoTerm - GPU-accelerated terminal emulator with tabs, splits, and themes.
 Features:
 - Hardware-accelerated rendering via wgpu
