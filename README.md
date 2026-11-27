@@ -42,13 +42,22 @@ alacritty_terminal 0.26 · portable-pty 0.9 · arboard 3
 
 ## Install
 
+### Linux / macOS
 ```bash
 ./install.sh              # → ~/.local/bin/neoterm
 ./install.sh --system     # → /usr/local (needs sudo)
 ./uninstall.sh            # removes the binary, desktop entry and icon
 ```
-
 `PREFIX` and `DESTDIR` are honored for packaging.
+
+### Windows (with Rust)
+```bash
+# Requires: Rust toolchain (rustup), Visual Studio Build Tools (MSVC)
+cargo install --git https://github.com/FMB237/Neoterm --branch main
+```
+The binary installs to `%USERPROFILE%\.cargo\bin\neoterm.exe`.
+
+> **Note:** Windows MSI installer is in progress. For now, use the binary from [GitHub Releases](https://github.com/FMB237/Neoterm/releases) or install via cargo as above.
 
 ## Usage
 
