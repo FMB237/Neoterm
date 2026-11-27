@@ -40,7 +40,9 @@ jobs:
           cd target/release
           sha256sum neoterm 2>/dev/null | tee checksums.txt
           sha256sum neoterm > neoterm.sha256
-          sha256sum *.deb 2>/dev/null >> checksums.txt
+          if ls *.deb 1> /dev/null 2>&1; then
+            sha256sum *.deb >> checksums.txt
+          fi
 
       - name: Create release archive
         run: |
