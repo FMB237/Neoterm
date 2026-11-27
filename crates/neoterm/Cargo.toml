@@ -42,7 +42,7 @@ percent-encoding = "2.3"
 [package.metadata.deb]
 maintainer = "FMB237 <miguelfouenanf@gmail.com>"
 copyright = "2026 FMB237 <miguelfouenanf@gmail.com>"
-license-file = "../LICENSE"
+license-file = "LICENSE"
 section = "utils"
 priority = "optional"
 depends = "libvulkan1, libx11-6, libxkbcommon0, libwayland-client0, libasound2"
@@ -64,5 +64,5 @@ Features:
 [package.metadata.wix]
 manufacturer = "FMB237"
 upgrade-code = "12345678-1234-1234-1234-123456789abc"
-license-rtf = "../LICENSE.rtf"
-icon-path = "../assets/neoterm.ico"
+license-rtf = "LICENSE.rtf"
+icon-path = "neoterm.ico"

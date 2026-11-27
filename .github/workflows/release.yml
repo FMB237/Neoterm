@@ -26,8 +26,14 @@ jobs:
       - name: Build release
         run: cargo build --release
 
+      - name: Copy license and assets to crate for cargo-deb/cargo-wix
+        run: |
+          cp LICENSE crates/neoterm/LICENSE
+          cp LICENSE.rtf crates/neoterm/LICENSE.rtf
+          cp assets/neoterm.ico crates/neoterm/neoterm.ico
+
       - name: Build .deb package
-        run: cargo deb --no-build
+        run: cargo deb --no-build --manifest-path crates/neoterm/Cargo.toml
 
       - name: Create checksums
         run: |
@@ -75,7 +81,7 @@ jobs:
         run: cargo build --release
 
       - name: Build Windows installer (MSI)
-        run: cargo wix --no-build
+        run: cargo wix --no-build --manifest-path crates/neoterm/Cargo.toml
 
       - name: Upload Windows binary
         uses: actions/upload-artifact@v4
