@@ -81,8 +81,8 @@ jobs:
 
       - name: Copy license and assets to crate for cargo-wix
         run: |
-          Copy-Item LICENSE.rtf crates/neoterm/LICENSE.rtf
-          Copy-Item assets/neoterm.ico crates/neoterm/neoterm.ico
+          Copy-Item LICENSE.rtf crates/neoterm/wix/LICENSE.rtf
+          Copy-Item assets/neoterm.ico crates/neoterm/wix/neoterm.ico
 
       - name: Build release
         run: cargo build --release
