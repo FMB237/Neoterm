@@ -76,6 +76,11 @@ jobs:
         with:
           toolchain: stable-x86_64-pc-windows-msvc
 
+      - name: Install WiX Toolset
+        run: |
+          choco install wixtoolset -y
+          refreshenv
+
       - name: Install cargo-wix
         run: cargo install cargo-wix
 
@@ -86,11 +91,6 @@ jobs:
 
       - name: Build release
         run: cargo build --release
-
-      - name: Verify binary exists
-        run: |
-          dir target/release/neoterm.exe
-          cargo wix --no-build --bin-path target/release/neoterm.exe
 
       - name: Build Windows installer (MSI)
         run: cargo wix --no-build --bin-path target/release/neoterm.exe
