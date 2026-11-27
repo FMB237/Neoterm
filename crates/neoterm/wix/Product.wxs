@@ -45,17 +45,17 @@
   <Fragment>
     <ComponentGroup Id="ProductComponents" Directory="INSTALLFOLDER">
       <!-- Main executable -->
-      <Component Id="neoterm.exe" Guid="*">
+      <Component Id="neoterm.exe" Guid="*" Directory="INSTALLFOLDER">
         <File Id="neoterm.exe" Source="target/release/neoterm.exe" KeyPath="yes" />
       </Component>
       
       <!-- License -->
-      <Component Id="LICENSE.rtf" Guid="*">
+      <Component Id="LICENSE.rtf" Guid="*" Directory="INSTALLFOLDER">
         <File Id="LICENSE.rtf" Source="LICENSE.rtf" KeyPath="yes" />
       </Component>
       
       <!-- Icon -->
-      <Component Id="neoterm.ico" Guid="*">
+      <Component Id="neoterm.ico" Guid="*" Directory="INSTALLFOLDER">
         <File Id="neoterm.ico" Source="neoterm.ico" KeyPath="yes" />
       </Component>
     </ComponentGroup>
@@ -63,7 +63,7 @@
 
   <Fragment>
     <DirectoryRef Id="ProgramMenuDir">
-      <Component Id="Shortcuts" Guid="*">
+      <Component Id="Shortcuts" Guid="*" Directory="ProgramMenuDir">
         <Shortcut Id="StartMenuShortcut" 
                   Name="NeoTerm" 
                   Description="GPU Terminal Emulator" 
@@ -83,7 +83,7 @@
   </Fragment>
 
   <Fragment>
-    <Component Id="RegistryEntries" Guid="*">
+    <Component Id="RegistryEntries" Guid="*" Directory="INSTALLFOLDER">
       <RegistryKey Root="HKLM" Key="Software\FMB237\NeoTerm">
         <RegistryValue Name="InstallDir" Value="[INSTALLFOLDER]" Type="string" />
         <RegistryValue Name="Version" Value="0.4.0" Type="string" />
