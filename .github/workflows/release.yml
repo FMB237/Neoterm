@@ -80,7 +80,6 @@ jobs:
         run: |
           choco install wixtoolset -y
           refreshenv
-          $env:PATH += ";C:\Program Files (x86)\WiX Toolset v3.11\bin"
 
       - name: Install cargo-wix
         run: cargo install cargo-wix
@@ -93,8 +92,24 @@ jobs:
       - name: Build release
         run: cargo build --release
 
-      - name: Build Windows installer (MSI)
-        run: cargo wix --no-build --bin-path target/release/neoterm.exe
+      - name: Build Windows installer (MSI) using WiX directly
+        run: |
+          # Verify WiX is installed
+          $env:PATH += ";C:\Program Files (x86)\WiX Toolset v3.11\bin"
+          Write-Host "WiX path: $env:PATH"
+          candle.exe -help 2>$null || Write-Host "candle not in PATH"
+          light.exe -help 2>$null || Write-Host "light not in PATH"
+          
+          # Create MSI using WiX directly
+          $wixDir = "crates/neoterm/wix"
+          $outDir = "target/wix"
+          New-Item -ItemType Directory -Force -Path $outDir
+          
+          # Compile WXS to WIXOBJ
+          candle.exe -out $outDir/Product.wixobj $wixDir/Product.wxs
+          
+          # Link to create MSI
+          light.exe -out target/wix/neoterm-0.4.0-x64.msi $outDir/Product.wixobj -ext WixUIExtension
 
       - name: Upload Windows binary
         uses: actions/upload-artifact@v4
