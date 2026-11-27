@@ -80,6 +80,7 @@ jobs:
         run: |
           choco install wixtoolset -y
           refreshenv
+          $env:PATH += ";C:\Program Files (x86)\WiX Toolset v3.11\bin"
 
       - name: Install cargo-wix
         run: cargo install cargo-wix
