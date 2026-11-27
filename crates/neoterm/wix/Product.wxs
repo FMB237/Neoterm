@@ -46,7 +46,7 @@
     <ComponentGroup Id="ProductComponents" Directory="INSTALLFOLDER">
       <!-- Main executable -->
       <Component Id="neoterm.exe" Guid="*">
-        <File Id="neoterm.exe" Source="target/release/neoterm.exe" KeyPath="yes" />
+        <File Id="neoterm.exe" Source="../../target/release/neoterm.exe" KeyPath="yes" />
       </Component>
       
       <!-- License -->
@@ -97,7 +97,7 @@
         <RegistryValue Name="NoModify" Value="1" Type="integer" />
         <RegistryValue Name="NoRepair" Value="1" Type="integer" />
       </RegistryKey>
-      <RegistryKey Root="HKCU" Key="Software\FMB237\NeoTerm">
+      <RegistryKey Root="HKCU" Key="Software\FMB237\Neoterm">
         <RegistryValue Name="Installed" Value="1" Type="integer" KeyPath="yes" />
       </RegistryKey>
     </Component>
