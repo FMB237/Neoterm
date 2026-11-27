@@ -106,9 +106,10 @@
   <Fragment>
     <Property Id="WIXUI_EXITDIALOGOPTIONALTEXT" Value="Launch NeoTerm" />
     <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch NeoTerm after installation" />
-    <!-- CustomAction to launch app after install - uses ExeCommand only (no BinaryKey/DllEntry) -->
+    <!-- CustomAction to launch app after install - uses ExeCommand with FileKey -->
     <CustomAction Id="LaunchApplication" 
-                  ExeCommand="[INSTALLFOLDER]neoterm.exe"
+                  FileKey="neoterm.exe"
+                  ExeCommand=""
                   Impersonate="yes" 
                   Return="asyncNoWait" 
                   Execute="immediate" />
