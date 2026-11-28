@@ -1554,6 +1554,7 @@ dependencies = [
  "percent-encoding",
  "pollster",
  "portable-pty",
+ "regex",
  "serde",
  "serde_json",
  "toml",

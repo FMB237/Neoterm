@@ -634,7 +634,8 @@ impl Renderer {
         dividers: &[CellRect],
         scroll: ScrollState,
         strip: bool,
-        search: Option<(&str, usize, usize)>, // (query, match_count, current_match_1based)
+        // (query, match_count, current_match_1based, active option markers)
+        search: Option<(&str, usize, usize, &str)>,
         mut palette: Option<&mut crate::palette::PaletteState>,
         hud: Option<&crate::HudStats>,
     ) {
@@ -1442,7 +1443,7 @@ impl Renderer {
         // Shows magnifying glass icon, query text, and current/total match count.
         // Always rendered when search is active, regardless of tab strip visibility.
         let mut search_rect: Option<(f32, f32, f32, f32)> = None;
-        if let Some((query, match_count, _current)) = search {
+        if let Some((query, match_count, _current, flags)) = search {
             let line_h = self.font_size * 1.3 * scale;
             let pad = 10.0 * scale;
             let cell = self.advance() * scale;
@@ -1524,11 +1525,19 @@ impl Renderer {
                 .color(Color::rgb(255, 255, 255))
                 .weight(Weight::BOLD);
             let count = format!(" ({})", match_count);
-            let spans: Vec<(&str, Attrs)> = vec![
+            let mut spans: Vec<(&str, Attrs)> = vec![
                 ("🔍 ", base.clone()),
                 (query, query_attrs),
-                (count.as_str(), base.clone()),
             ];
+            // Lit option markers: `.*` regex, `ab|` whole word, `Aa` case.
+            if !flags.is_empty() {
+                let flag_attrs = Attrs::new()
+                    .family(family)
+                    .color(Color::rgb(130, 190, 255))
+                    .weight(Weight::BOLD);
+                spans.push((flags, flag_attrs));
+            }
+            spans.push((count.as_str(), base.clone()));
             self.search_buffer.set_rich_text(spans, &base, Shaping::Advanced, None);
             self.search_buffer.shape_until_scroll(&mut self.font_system, false);
         }

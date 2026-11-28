@@ -58,7 +58,8 @@ dependencies beyond the GPU stack. Currently at **v0.3.0**, installed via
   glyph, split panes get a focus cue, the tab strip reads as an index badge
   plus a clean title, and copy/paste report through a pill in the body
   corner); **scrollback search** (`Ctrl+Shift+F` over history and viewport
-  with live highlighting); **OSC 8 hyperlinks** (link text underlined,
+  with live highlighting, plus `Alt+R` / `Alt+W` / `Alt+C` for regex,
+  whole-word and case-sensitive matching); **OSC 8 hyperlinks** (link text underlined,
   `Ctrl+click` opens it); and **cursor styles** (block / underline / beam /
   hollow block, honoring `DECSCUSR`).
 - **Ship** — versioned binary, `assets/neoterm.desktop` (validated),
@@ -79,6 +80,7 @@ dependencies beyond the GPU stack. Currently at **v0.3.0**, installed via
 | `Ctrl+Shift+Plus` / `Minus` / `0` | Font size up / down / reset (session-only) |
 | `Ctrl+Shift+R` / `U` | Rename the active tab (Enter commits, Esc cancels) / release it back to the live title |
 | `Ctrl+Shift+F` | Search scrollback + viewport (`Enter` next, `Shift+Enter` previous, `Esc` closes) |
+| `Alt+R` / `Alt+W` / `Alt+C` | In the search pill: regex / whole word / case-sensitive |
 | `Ctrl+Shift+P` | Command palette: filter commands, `Up`/`Down` to move, `Enter` to run, `Esc` to close |
 | `Ctrl+click` | Open an OSC 8 hyperlink with the system opener |
 | `PageUp/PageDown` (`Shift` forces local) | Scrollback, unless a fullscreen app owns the keys |

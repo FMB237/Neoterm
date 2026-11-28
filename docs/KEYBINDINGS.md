@@ -49,6 +49,14 @@ Auto-generated from `crates/neoterm/src/input.rs`.
 | Keys | Action |
 |------|--------|
 | `Ctrl+Shift+F` | Open search overlay (type to filter, Enter next match, Shift+Enter previous, Esc closes) |
+| `Alt+R` | Toggle regex mode (the query is a regular expression) |
+| `Alt+W` | Toggle whole-word mode (`\b` boundaries around the query) |
+| `Alt+C` | Toggle case-sensitive matching |
+
+The active options light up as markers inside the search pill: `.*` (regex),
+`ab|` (whole word), `Aa` (case-sensitive). `bad-regex` appears in red when the
+pattern does not compile, and the overlay reports zero matches instead of
+highlighting garbage.
 
 ## Command Palette
 

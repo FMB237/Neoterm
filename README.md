@@ -34,6 +34,8 @@ alacritty_terminal 0.26 · portable-pty 0.9 · arboard 3
   preference list), true sRGB color management, runtime font zoom.
 - **Search** — `Ctrl+Shift+F` searches the focused pane's scrollback *and*
   viewport, highlights every match in place, and jumps between them.
+  `Alt+R` / `Alt+W` / `Alt+C` switch on regex, whole-word and case-sensitive
+  matching, with the active options lit inside the search pill.
 - **Links** — OSC 8 hyperlinks render underlined and open on `Ctrl+click`.
 - **Cursor** — block, underline, beam and hollow block, honoring `DECSCUSR`,
   drawn so the character underneath stays readable.
@@ -94,6 +96,7 @@ neoterm -e htop                  # run a command instead of the shell
 | `Ctrl+Shift+Plus` / `Minus` / `0` | Font size up / down / reset |
 | `Ctrl+Shift+R` / `U` | Rename the active tab / release it to the live title |
 | `Ctrl+Shift+F` | Search scrollback (`Enter` next, `Shift+Enter` previous, `Esc` closes) |
+| `Alt+R` / `Alt+W` / `Alt+C` | In the search pill: regex / whole word / case-sensitive |
 | `Ctrl+Shift+P` | Command palette (`Up`/`Down` move, `Enter` runs, `Esc` closes) |
 | `Ctrl+click` | Open a hyperlink |
 | `PageUp/PageDown` (`Shift` forces local) | Scrollback |

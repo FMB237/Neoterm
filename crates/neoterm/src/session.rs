@@ -377,15 +377,15 @@ pub fn set_autosave(enabled: bool) -> Result<()> {
 mod tests {
     use super::*;
 
+    // The autosave preference is a single file on disk, so both assertions
+    // live in one test: splitting them let the parallel test harness delete
+    // the file between `set_autosave` and `get_autosave`.
     #[test]
-    fn autosave_defaults_to_false() {
+    fn autosave_preference_round_trip() {
         let _ = std::fs::remove_file(autosave_path());
-        assert!(!get_autosave());
-    }
+        assert!(!get_autosave(), "missing file means autosave is off");
 
-    #[test]
-    fn autosave_round_trip() {
-        // If the filesystem is read-only (e.g., sandbox), skip the write test.
+        // If the filesystem is read-only (e.g., sandbox), skip the write half.
         if set_autosave(true).is_err() {
             return;
         }

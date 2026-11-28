@@ -437,6 +437,28 @@ required — Xvfb alone cannot create a wgpu surface on this machine):
 | **Search bar not visible (panic)** | Double `unwrap()` on `Option<(&str, usize)>` — first unwrap consumed the Option, second panicked. | Properly destructure once with `if let Some((query, match_count)) = search`. | `83f9fb7` |
 | **Search bar invisible when tab strip hidden** | Search bar rendering was inside `if strip { ... }` block. Invisible when `tab_bar=never` or `auto` with 1 tab. | Move search bar rendering outside strip condition — always renders when search active. | `7219b84` |
 
+### Search Options (D11) — `Alt+R` / `Alt+W` / `Alt+C`
+
+| Piece | Behaviour |
+|-------|-----------|
+| Regex mode (`Alt+R`) | The query is compiled as a `regex` pattern; invalid patterns set `invalid_pattern`, show `bad-regex` in the pill, and report zero matches instead of highlighting an empty match everywhere. |
+| Whole-word mode (`Alt+W`) | Wraps the query in `\b…\b`; with regex off the query is escaped first, with regex on it is wrapped as `\b(?:…)\b`. Whole-word mode builds a regex even when regex mode is off, which is why the plain-text path is only used when neither option is set. |
+| Case-sensitive (`Alt+C`) | Passed to `RegexBuilder::case_insensitive(!case_sensitive)` in regex mode, and to the lowercasing step in plain-text mode. |
+| Feedback | The active options are lit inside the search pill (`.*`, `ab|`, `Aa`) via a fourth `search` tuple element, so the overlay always says what it is matching. |
+
+The three toggles deliberately use `Alt` in the overlay: `Ctrl+Shift+R/W/C` are
+already rename-tab / close-pane / copy, and those still work while the overlay
+is open because only Backspace, Escape, Enter, Alt+R/W/C and printable text are
+consumed.
+
+### Test isolation — autosave preference
+
+`session::tests::autosave_defaults_to_false` and `autosave_round_trip` shared one
+file on disk, so the parallel harness could delete it between `set_autosave(true)`
+and `get_autosave()`. Merged into a single `autosave_preference_round_trip` test
+that removes, asserts off, sets on, asserts on, then sets off again.
+
+
 ### Command Palette (D2) — `Ctrl+Shift+P`
 
 | Bug | Root Cause | Fix | Commit |

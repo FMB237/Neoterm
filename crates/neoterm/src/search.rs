@@ -11,6 +11,7 @@ use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::Term;
 use alacritty_terminal::event::EventListener;
+use regex::RegexBuilder;
 
 /// A single search match: the grid line it appears on, and the inclusive
 /// column range `[col_start, col_end)` in grid columns.
@@ -31,8 +32,14 @@ pub struct SearchMatch {
 pub struct SearchState {
     pub query: String,
     pub case_sensitive: bool,
+    pub regex: bool,
+    pub whole_word: bool,
     matches: Vec<SearchMatch>,
     current: usize,
+    // Cached regex to avoid recompilation on every search
+    regex_cache: Option<regex::Regex>,
+    // True when the last query failed to compile as a regex.
+    invalid_pattern: bool,
 }
 
 impl SearchState {
@@ -41,8 +48,12 @@ impl SearchState {
         Self {
             query,
             case_sensitive: false,
+            regex: false,
+            whole_word: false,
             matches: Vec::new(),
             current: 0,
+            regex_cache: None,
+            invalid_pattern: false,
         }
     }
 
@@ -68,10 +79,49 @@ impl SearchState {
         let history = grid.history_size();
 
         self.matches.clear();
+        self.current = 0;
 
         if self.query.is_empty() {
-            self.current = 0;
+            self.regex_cache = None;
+            self.invalid_pattern = false;
             return;
+        }
+
+        // A regex is needed when the user asked for one, or when whole-word
+        // mode needs `\b` boundaries around a literal query.
+        let needs_regex = self.regex || self.whole_word;
+        if !needs_regex {
+            self.regex_cache = None;
+            self.invalid_pattern = false;
+        } else if self.regex_cache.is_none() {
+            let pattern = if self.regex {
+                self.query.clone()
+            } else {
+                regex::escape(&self.query)
+            };
+            let pattern = if self.whole_word {
+                if self.regex {
+                    format!(r"\b(?:{})\b", pattern)
+                } else {
+                    format!(r"\b{}\b", pattern)
+                }
+            } else {
+                pattern
+            };
+            match RegexBuilder::new(&pattern)
+                .case_insensitive(!self.case_sensitive)
+                .build()
+            {
+                Ok(re) => {
+                    self.regex_cache = Some(re);
+                    self.invalid_pattern = false;
+                }
+                Err(_) => {
+                    self.regex_cache = None;
+                    self.invalid_pattern = true;
+                    return;
+                }
+            }
         }
 
         let needle = if self.case_sensitive {
@@ -125,40 +175,53 @@ impl SearchState {
                 continue;
             }
 
-            let haystack = if self.case_sensitive {
-                text.clone()
+            if let Some(ref regex) = self.regex_cache {
+                for m in regex.find_iter(&text) {
+                    // Skip zero-width matches: they would highlight nothing.
+                    if m.start() == m.end() {
+                        continue;
+                    }
+                    let c_start = col_of_char.get(m.start()).copied().unwrap_or(0);
+                    let c_end = col_of_char
+                        .get(m.end())
+                        .copied()
+                        .unwrap_or_else(|| col_of_char.last().copied().unwrap_or(0) + 1);
+                    self.matches.push(SearchMatch {
+                        line: gl,
+                        col_start: c_start,
+                        col_end: c_end.max(c_start + 1),
+                    });
+                }
             } else {
-                text.to_lowercase()
-            };
-
-            let mut start = 0;
-            while let Some(found) = haystack[start..].find(&needle) {
-                let abs_start = start + found;
-                let abs_end = abs_start + needle.len();
-                let c_start = col_of_char[abs_start];
-                // End column: the column after the last matched char.
-                // If the match ends exactly at a char boundary, col_end is
-                // the start column of the next char, or `columns` if this
-                // is the last char.
-                let c_end = if abs_end < col_of_char.len() {
-                    col_of_char[abs_end]
+                let haystack = if self.case_sensitive {
+                    text.clone()
                 } else {
-                    // Last char: advance by its width.
-                    let last_ch = text.chars().nth(abs_end - 1).unwrap_or('\0');
-                    let _last_width = if last_ch.is_ascii() { 1 } else { last_ch.len_utf8() };
-                    // In grid columns, a wide char takes 2. Approximate:
-                    col + 1
+                    text.to_lowercase()
                 };
-                self.matches.push(SearchMatch {
-                    line: gl,
-                    col_start: c_start,
-                    col_end: c_end.max(c_start + 1),
-                });
-                start = abs_end;
+
+                let mut start = 0;
+                while let Some(found) = haystack[start..].find(&needle) {
+                    let abs_start = start + found;
+                    let abs_end = abs_start + needle.len();
+                    let c_start = col_of_char[abs_start];
+                    // End column: the column after the last matched char.
+                    // If the match ends exactly at a char boundary, col_end is
+                    // the start column of the next char, or the line width if
+                    // this is the last char.
+                    let c_end = if abs_end < col_of_char.len() {
+                        col_of_char[abs_end]
+                    } else {
+                        col + 1
+                    };
+                    self.matches.push(SearchMatch {
+                        line: gl,
+                        col_start: c_start,
+                        col_end: c_end.max(c_start + 1),
+                    });
+                    start = abs_end;
+                }
             }
         }
-
-        self.current = 0;
     }
 
     /// Move to the next match (wraps around). Returns the new current match.
@@ -187,7 +250,7 @@ impl SearchState {
         self.matches.get(self.current)
     }
 
-    /// Total number of matches found.
+    /// Total number matches found.
     pub fn match_count(&self) -> usize {
         self.matches.len()
     }
@@ -200,6 +263,66 @@ impl SearchState {
     /// Whether there are no matches.
     pub fn is_empty(&self) -> bool {
         self.matches.is_empty()
+    }
+
+    /// Append a character to the query.
+    ///
+    /// Any compiled regex is dropped: it was built from the previous query and
+    /// would otherwise keep matching the old text.
+    pub fn push_char(&mut self, c: char) {
+        self.query.push(c);
+        self.regex_cache = None;
+    }
+
+    /// Remove the last character of the query. Returns whether anything was
+    /// removed. Drops the compiled regex for the same reason as `push_char`.
+    pub fn backspace(&mut self) -> bool {
+        let popped = self.query.pop().is_some();
+        if popped {
+            self.regex_cache = None;
+        }
+        popped
+    }
+
+    /// Whether the current query is an invalid regular expression.
+    pub fn invalid_pattern(&self) -> bool {
+        self.invalid_pattern
+    }
+
+    /// Toggle regex mode.
+    pub fn toggle_regex(&mut self) {
+        self.regex = !self.regex;
+        self.regex_cache = None; // Force rebuild on next search
+    }
+
+    /// Toggle whole word mode.
+    pub fn toggle_whole_word(&mut self) {
+        self.whole_word = !self.whole_word;
+        self.regex_cache = None; // Force rebuild on next search
+    }
+
+    /// Set regex mode explicitly.
+    pub fn set_regex(&mut self, enabled: bool) {
+        if self.regex != enabled {
+            self.regex = enabled;
+            self.regex_cache = None;
+        }
+    }
+
+    /// Set whole word mode explicitly.
+    pub fn set_whole_word(&mut self, enabled: bool) {
+        if self.whole_word != enabled {
+            self.whole_word = enabled;
+            self.regex_cache = None;
+        }
+    }
+
+    /// Set case sensitivity.
+    pub fn set_case_sensitive(&mut self, enabled: bool) {
+        if self.case_sensitive != enabled {
+            self.case_sensitive = enabled;
+            self.regex_cache = None;
+        }
     }
 }
 
@@ -353,5 +476,84 @@ mod tests {
         state.search(&term);
         let m = state.current_match().unwrap();
         assert!(m.col_end > m.col_start);
+    }
+
+    #[test]
+    fn regex_mode_matches_pattern() {
+        let mut term = headless_term(20, 10);
+        feed(&mut term, "hello world\nhello foo\n");
+        let mut state = SearchState::new(r"hello \w+".to_string());
+        state.set_regex(true);
+        state.search(&term);
+        assert_eq!(state.match_count(), 2);
+    }
+
+    #[test]
+    fn regex_mode_case_insensitive() {
+        let mut term = headless_term(20, 10);
+        feed(&mut term, "Hello World\n");
+        let mut state = SearchState::new("hello".to_string());
+        state.set_regex(true);
+        state.set_case_sensitive(false);
+        state.search(&term);
+        assert_eq!(state.match_count(), 1);
+    }
+
+    #[test]
+    fn whole_word_mode_matches_only_whole_words() {
+        let mut term = headless_term(20, 10);
+        feed(&mut term, "hello world hellofoo\n");
+        let mut state = SearchState::new("hello".to_string());
+        state.set_whole_word(true);
+        state.search(&term);
+        assert_eq!(state.match_count(), 1);
+    }
+
+    #[test]
+    fn toggle_regex_clears_cache() {
+        let mut term = headless_term(20, 10);
+        feed(&mut term, "hello world\n");
+        let mut state = SearchState::new("hello".to_string());
+        state.set_regex(true);
+        state.search(&term);
+        assert_eq!(state.match_count(), 1);
+        
+        // Toggle regex off
+        state.toggle_regex();
+        state.search(&term);
+        // Should still find match in plain text mode
+        assert_eq!(state.match_count(), 1);
+    }
+
+    #[test]
+    fn toggle_whole_word_clears_cache() {
+        let mut term = headless_term(20, 10);
+        feed(&mut term, "hello world hellofoo\n");
+        let mut state = SearchState::new("hello".to_string());
+        state.set_whole_word(true);
+        state.search(&term);
+        assert_eq!(state.match_count(), 1);
+        
+        // Toggle whole word off
+        state.toggle_whole_word();
+        state.search(&term);
+        assert_eq!(state.match_count(), 2);
+    }
+
+    #[test]
+    fn editing_the_query_rebuilds_the_regex() {
+        let mut term = headless_term(20, 10);
+        feed(&mut term, "hello world hellofoo\r\n");
+        let mut state = SearchState::new("hello".to_string());
+        state.set_regex(true);
+        state.search(&term);
+        assert_eq!(state.match_count(), 2);
+
+        // Editing the query must invalidate the compiled regex; otherwise the
+        // cache keeps matching "hello" and the count never changes.
+        while state.backspace() {}
+        state.push_char('w');
+        state.search(&term);
+        assert_eq!(state.match_count(), 1, "query 'w' should match only 'world'");
     }
 }

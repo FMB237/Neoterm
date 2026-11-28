@@ -1272,9 +1272,30 @@ impl App {
             .map(|until| Instant::now() < until)
             .unwrap_or(false);
         r.set_flash(flash);
+        // Active search options, shown as lit markers inside the search pill.
+        let search_flags = ws
+            .search
+            .as_ref()
+            .map(|s| {
+                let mut f = String::new();
+                if s.regex {
+                    f.push_str(" .*");
+                }
+                if s.whole_word {
+                    f.push_str(" ab|");
+                }
+                if s.case_sensitive {
+                    f.push_str(" Aa");
+                }
+                if s.invalid_pattern() {
+                    f.push_str(" bad-regex");
+                }
+                f
+            })
+            .unwrap_or_default();
         let search_bar = ws.search.as_ref().map(|s| {
             let current = if s.matches().is_empty() { 0 } else { s.current_index() + 1 };
-            (s.query.as_str(), s.matches().len(), current)
+            (s.query.as_str(), s.matches().len(), current, search_flags.as_str())
         });
 // HUD stats are updated in the event loop with real frame deltas.
         // Draw just passes the current stats to the renderer.
@@ -1508,7 +1529,7 @@ impl App {
         let Some(state) = ws.search.as_mut() else {
             return false;
         };
-        state.query.push(ch);
+        state.push_char(ch);
         self.rescan_search(ws);
         true
     }
@@ -1517,7 +1538,7 @@ impl App {
     fn search_backspace(&mut self, ws: &mut WindowState) {
         let mut popped = false;
         if let Some(state) = ws.search.as_mut() {
-            popped = state.query.pop().is_some();
+            popped = state.backspace();
         }
         if popped {
             self.rescan_search(ws);
@@ -2341,6 +2362,36 @@ impl App {
                         self.search_next(ws);
                     }
                     return;
+                }
+                // Alt+R / Alt+W / Alt+C toggle the search options. Plain
+                // Ctrl+Shift+R/W/C are already taken by rename / close pane
+                // / copy, so the overlay uses Alt instead.
+                Key::Character(s) if self.mods.state().alt_key() => {
+                    let handled = match s.as_str() {
+                        "r" | "R" => {
+                            if let Some(state) = ws.search.as_mut() {
+                                state.toggle_regex();
+                            }
+                            true
+                        }
+                        "w" | "W" => {
+                            if let Some(state) = ws.search.as_mut() {
+                                state.toggle_whole_word();
+                            }
+                            true
+                        }
+                        "c" | "C" => {
+                            if let Some(state) = ws.search.as_mut() {
+                                state.set_case_sensitive(!state.case_sensitive);
+                            }
+                            true
+                        }
+                        _ => false,
+                    };
+                    if handled {
+                        self.rescan_search(ws);
+                        return;
+                    }
                 }
                 _ => {}
             }
